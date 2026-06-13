@@ -1,0 +1,62 @@
+# PHANTOM-ECHO REVEAL v18 — Python Dependencies
+# Install with: pip install -r requirements.txt
+#
+# Note on VideoScene: not yet a public HuggingFace release.
+# Tier 1 (VideoScene API) requires VIDEOSCENE_API_URL in .env
+# Tier 2 (local SD3) requires GPU + diffusers>=0.28
+# Tier 3 (physics-consistent synthetic) works with no GPU — default for simulation
+
+# ── Core numeric / scientific ─────────────────────────────────────────────
+numpy>=1.24
+scipy>=1.11
+scikit-learn>=1.3
+
+# ── 3D reconstruction & mesh ─────────────────────────────────────────────
+open3d>=0.17           # SPSR, point cloud, KDTree (pip install open3d)
+trimesh>=4.0           # mesh repair and analysis
+
+# ── Neural inference (edge) ──────────────────────────────────────────────
+torch>=2.1             # SlotLSTM, QuantVGGT, MobileSAM
+torchvision>=0.16
+# MobileSAM: pip install git+https://github.com/ChaoningZhang/MobileSAM.git
+# MobileCLIP: pip install git+https://github.com/apple/ml-mobileclip.git
+
+# ── Cloud generation (Tier 2 — optional) ─────────────────────────────────
+diffusers>=0.28        # Stable Diffusion 3D fallback
+transformers>=4.40     # CLIP fallback + LLaVA
+
+# ── Audio processing (acoustic pipeline) ─────────────────────────────────
+# pyroomacoustics>=0.7   # optional: acoustic room simulation validation only
+
+# ── Web server & cloud API ────────────────────────────────────────────────
+flask>=3.0
+aiohttp>=3.9
+requests>=2.31
+
+# ── Vector cache ─────────────────────────────────────────────────────────
+faiss-cpu>=1.7         # FAISS similarity search (cloud)
+redis>=5.0             # Redis/Valkey semantic cache (edge)
+
+# ── Visualisation & viewer ────────────────────────────────────────────────
+matplotlib>=3.8
+qrcode[pil]>=7.4       # QR code generation for WebGPU viewer
+Pillow>=10.0
+
+# ── ROS2 integration (optional — only if ROS2 Humble is installed) ────────
+# rclpy and nav_msgs are installed via: apt install ros-humble-nav2-bringup
+# Do NOT pip-install rclpy — it must come from the ROS2 deb packages.
+
+# ── Utilities ─────────────────────────────────────────────────────────────
+python-dotenv>=1.0     # .env file loading
+tqdm>=4.66
+
+# ── v22 Real-time layer (FastAPI + WebSocket streaming dashboard) ─────────
+fastapi>=0.110
+uvicorn[standard]>=0.29
+websockets>=12.0
+pydantic>=2.0
+python-multipart>=0.0.9    # photo upload endpoint
+
+# ── Photo mode (optional — monocular depth from your own photos) ──────────
+# pip install torch transformers pillow
+# Model: depth-anything/Depth-Anything-V2-Small-hf (open weight, ~100MB)

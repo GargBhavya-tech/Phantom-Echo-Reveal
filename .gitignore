@@ -1,0 +1,23 @@
+# Python cache
+**/__pycache__/
+**/*.pyc
+*.pyo
+*.pyd
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Project specific
+output/
+uploads/
+datasets/
+
+# Unnecessary files
+walkthrough.md
+phantom_echo_analysis.md
