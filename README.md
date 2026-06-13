@@ -306,5 +306,4 @@ ScanNet download: https://github.com/ScanNet/ScanNet
 ## License
 
 MIT — see LICENSE
-#   P h a n t o m - E c h o - R e v e a l  
- 
+#
