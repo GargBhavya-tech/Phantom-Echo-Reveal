@@ -5,9 +5,9 @@
 - **Team name** - Chole Bhhature
 - **Team members (Names)** - Bhavya Garg
 - **Institute/College Name** - IIIT Bangalore, 26/C, Electronics City Phase 1, Hosur Road, Bengaluru 560100
-- **Final Presentation Google Drive Link** - *(upload `PHANTOM_ECHO_REVEAL_Presentation.pptx` as PDF to Google Drive, set link sharing to "Anyone with the link", paste here)*
-- **Full Submission Demo Video Link** - *(record the live dashboard demo below, upload to YouTube as unlisted, paste here)*
-- **Setup & Result Reproducibility Video Link** - *(screen-record the Quick Start + `--mode eval` steps below, upload to YouTube as unlisted, paste here)*
+- **Final Presentation Google Drive Link** 
+- **Full Submission Demo Video Link** 
+- **Setup & Result Reproducibility Video Link**
 
 ### Project Artefacts
 
@@ -375,6 +375,7 @@ ScanNet download: https://github.com/ScanNet/ScanNet
 ## License
 
 MIT — see LICENSE
+<<<<<<< HEAD
 
 ---
 
@@ -399,3 +400,6 @@ auto-served by FastAPI at **http://localhost:8000/docs** (Swagger UI).
 
 > Demo-mode auth: set `PHANTOM_DEMO_TOKEN` to require an `X-Demo-Token` header
 > on `/api/reveal` and `/api/mode_b` (prevents injection on shared-WiFi demos).
+=======
+#
+>>>>>>> 2dc7877fcfe2a119ee6bc7797109727dfdfa2356
