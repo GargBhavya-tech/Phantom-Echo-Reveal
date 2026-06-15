@@ -11,20 +11,26 @@ Endpoints:
     GET  /                  -> dashboard (src/frontend/index.html)
     WS   /ws                -> event stream (snapshot replay on connect)
     POST /api/scan/start    -> {n_frames?, frame_delay_s?}
+    POST /api/scan/stop     -> cancel a running scan gracefully
     POST /api/reveal        -> {bbox_min:[3], bbox_max:[3], semantic?}
+    POST /api/mode_b        -> robot auto-reveal for RED zones
+    POST /api/photo         -> upload image for monocular depth scan
     GET  /api/state         -> engine state + live tag counts
     GET  /api/kpis          -> KPI table (eval_results.json + Atlas baseline)
+    GET  /api/scene/export  -> download scene_mesh.ply
+    GET  /health            -> server health + uptime
 """
 
 import os
 import json
+import time
 import asyncio
 import logging
 from typing import List, Optional
 
 import numpy as np
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -36,7 +42,22 @@ logger = logging.getLogger("phantom.server")
 
 FRONTEND = os.path.join(os.path.dirname(__file__), "..", "frontend", "index.html")
 
+# MISSING-7 FIX: optional demo token for shared-WiFi demos. Set via env var:
+#   export PHANTOM_DEMO_TOKEN=secrettoken
+# When set, /api/reveal and /api/mode_b require X-Demo-Token header.
+DEMO_TOKEN = os.environ.get("PHANTOM_DEMO_TOKEN", "")
+_server_start_time = time.time()
+
 app = FastAPI(title="PHANTOM-ECHO REVEAL", version="22.0")
+
+
+def _check_token(request: Request) -> Optional[JSONResponse]:
+    """MISSING-7 FIX: validate demo token when PHANTOM_DEMO_TOKEN is set."""
+    if DEMO_TOKEN and request.headers.get("X-Demo-Token") != DEMO_TOKEN:
+        return JSONResponse(
+            {"error": "Invalid or missing X-Demo-Token header"},
+            status_code=403)
+    return None
 
 
 # ── WebSocket hub ──────────────────────────────────────────────────────────
@@ -228,7 +249,11 @@ async def photo(file: UploadFile = File(...)):
 
 
 @app.post("/api/reveal")
-async def reveal(req: RevealRequest):
+async def reveal(req: RevealRequest, request: Request):
+    # MISSING-7 FIX: check demo token when configured
+    auth_err = _check_token(request)
+    if auth_err:
+        return auth_err
     if len(req.bbox_min) != 3 or len(req.bbox_max) != 3:
         return JSONResponse({"error": "bbox_min/bbox_max must be length 3"}, status_code=400)
     # EDGE-1 FIX: validate that bbox_min < bbox_max on each axis.
@@ -253,6 +278,18 @@ async def state():
             "total": len(engine.all_gaussians)}
 
 
+@app.post("/api/scan/stop")
+async def scan_stop():
+    """MISSING-3 FIX: gracefully cancel a running scan.
+
+    Sets a stop flag that the frame loop reads after each sleep().
+    The scan thread will finish the current frame and then exit cleanly,
+    emitting a final summary event before setting state='complete'.
+    """
+    stopped = engine.stop_scan()
+    return {"stopped": stopped, "state": engine.state}
+
+
 class ModeBRequest(BaseModel):
     """Mode B: robot has reached a RED zone and requests auto-generation."""
     robot_position: List[float]          # [x, y, z] current robot world pos
@@ -261,7 +298,7 @@ class ModeBRequest(BaseModel):
 
 
 @app.post("/api/mode_b")
-async def mode_b(req: ModeBRequest):
+async def mode_b(req: ModeBRequest, request: Request):
     """Mode B — autonomous robot trigger: when the robot's Nav2 path enters a
     RED zone it cannot navigate through, it POSTs here to request on-the-fly
     generation.  The engine finds all RED Gaussians within radius_m of the
@@ -271,6 +308,11 @@ async def mode_b(req: ModeBRequest):
     This implements the documented Mode B flow:
         robot hits RED zone → pauses → PHANTOM reveals → robot resumes
     """
+    # MISSING-7 FIX: check demo token when configured
+    auth_err = _check_token(request)
+    if auth_err:
+        return auth_err
+
     if not engine.all_gaussians:
         return JSONResponse({"error": "no scene loaded"}, status_code=400)
 
@@ -289,16 +331,17 @@ async def mode_b(req: ModeBRequest):
     result = await asyncio.to_thread(
         engine.reveal, bmin, bmax, None, req.request_id)
 
-    # Broadcast Mode B event so the dashboard shows the auto-trigger toast
-    engine._emit({"type": "mode_b",
-                  "request_id": req.request_id,
-                  "semantic": result.get("semantic"),
-                  "gaussians": result.get("gaussians", []),
-                  "latency_ms": result.get("latency_ms")})
-    return {"revealed": len(result.get("gaussians", [])),
-            "semantic": result.get("semantic"),
-            "latency_ms": result.get("latency_ms"),
-            "tier": result.get("tier")}
+    # BUG-PROD-5 FIX: engine.reveal() already emits a 'reveal_result' event
+    # internally. Do NOT emit a second 'mode_b' event with the same Gaussians
+    # — the frontend would receive them twice and double the n_revealed counter
+    # and add duplicates to the Three.js scene.
+    return {
+        "revealed": len(result.get("gaussians", [])),
+        "semantic": result.get("semantic"),
+        "latency_ms": result.get("latency_ms"),
+        "tier": result.get("tier"),
+        "request_id": req.request_id,
+    }
 
 
 @app.get("/api/kpis")
@@ -313,6 +356,46 @@ async def kpis():
         except Exception:
             continue
     return out
+
+
+@app.get("/api/scene/export")
+async def export_scene(format: str = "ply"):
+    """MISSING-4 FIX: download the reconstructed scene mesh as PLY.
+
+    The pipeline writes scene_mesh.ply and scene_gaussians.ply to OUTPUT_DIR.
+    Judges can download and open these in MeshLab / Blender to verify the
+    reconstruction quality without requiring a live dashboard connection.
+    """
+    # Try mesh first, fall back to Gaussian PLY
+    candidates = [
+        (os.path.join(OUTPUT_DIR, "scene_mesh.ply"),       "phantom_scene_mesh.ply"),
+        (os.path.join(OUTPUT_DIR, "scene_gaussians.ply"),  "phantom_scene_gaussians.ply"),
+    ]
+    for path, filename in candidates:
+        if os.path.exists(path):
+            return FileResponse(
+                path,
+                media_type="application/octet-stream",
+                filename=filename)
+    return JSONResponse(
+        {"error": "No mesh file found — run a scan first, then check output/"},
+        status_code=404)
+
+
+@app.get("/health")
+async def health():
+    """MISSING-5 FIX: standard health-check endpoint.
+
+    Returns engine state, Gaussian count, and server uptime. Useful for
+    smoke-testing the deployment and for load-balancer health probes.
+    """
+    return {
+        "status": "ok",
+        "engine_state":  engine.state,
+        "n_gaussians":   len(engine.all_gaussians),
+        "uptime_s":      round(time.time() - _server_start_time, 1),
+        "demo_token_set": bool(DEMO_TOKEN),
+    }
 
 
 if __name__ == "__main__":

@@ -65,6 +65,14 @@ MAX_STREAM_PER_FRAME = int(os.environ.get("PHANTOM_STREAM_CAP", "1500"))
 
 ALL_TAGS = [TAG_WHITE, TAG_BLUE, TAG_TEAL, TAG_GREEN, TAG_YELLOW, TAG_RED, TAG_ORANGE]
 
+# MISSING-6 FIX: module-level seeded RNG for acoustic noise — guarantees that
+# TEAL cluster assignments are identical across runs (README reproducibility claim).
+_ACOUSTIC_RNG = np.random.default_rng(seed=42)
+
+# BUG-PROD-7 FIX: workers=-1 (all CPUs) raises RuntimeError on Windows when
+# called from a daemon thread because daemon processes cannot have children.
+_KD_WORKERS = 1 if os.name == "nt" else -1
+
 
 def _wire(g: Dict[str, Any]) -> Dict[str, Any]:
     """Compact wire representation of one Gaussian for WebSocket streaming."""
@@ -84,6 +92,10 @@ class RealtimeEngine:
         self._emit_cb   = emit
         self._thread:  Optional[threading.Thread] = None
         self._running   = False
+        # BUG-PROD-3 FIX: dedicated mode enum prevents the ~1ms race window
+        # between _running=True and _running=False where photo_scan() can sneak
+        # past the guard and reset all_gaussians mid-scan.
+        self._mode      = "idle"               # "idle" | "scanning" | "photo"
         self._lock      = threading.Lock()
         self.events: List[Dict] = []          # replay buffer for late joiners
         self.state      = "idle"               # idle|scanning|complete|error
@@ -96,6 +108,8 @@ class RealtimeEngine:
         self._llava     = LLaVASceneDescriber()
         self._phone_positions: List[np.ndarray] = []
         self.dynamic_latest: List[Dict] = []
+        # MISSING-3 FIX: stop-scan flag checked inside the frame loop.
+        self._stop_requested = False
 
     # ── event plumbing ────────────────────────────────────────────────────
     def _emit(self, ev: Dict):
@@ -116,30 +130,62 @@ class RealtimeEngine:
         self._emit({"type": "log", "msg": msg})
 
     def snapshot(self) -> List[Dict]:
+        """Return replay buffer for late-joining WebSocket clients.
+
+        BUG-PROD-2 FIX: older frame events are stripped of their 'dynamic' field
+        so a late joiner does not receive all historical ORANGE positions and
+        render them simultaneously (ghost fleet / browser freeze).
+        """
         with self._lock:
-            return list(self.events)
+            events = list(self.events)
+        # Find the index of the last frame event
+        last_frame_idx = None
+        for i in range(len(events) - 1, -1, -1):
+            if events[i].get("type") == "frame":
+                last_frame_idx = i
+                break
+        # Strip 'dynamic' from all but the most recent frame event
+        result = []
+        for i, e in enumerate(events):
+            if e.get("type") == "frame" and i != last_frame_idx:
+                e = {k: v for k, v in e.items() if k != "dynamic"}
+            result.append(e)
+        return result
 
     # ── public API ────────────────────────────────────────────────────────
     def start_scan(self, n_frames: int = 8, frame_delay_s: float = 0.6,
                    source: str = "synthetic",
                    dataset_path: Optional[str] = None) -> bool:
-        # NEW-BUG-2 FIX: check _running and set state/running atomically inside
-        # the lock so a second concurrent /api/scan/start request (e.g. two tabs
-        # clicking simultaneously) cannot sneak past the guard and spawn a second
-        # scan thread that shares all_gaussians unsynchronised.
+        # BUG-PROD-3 FIX: check _mode (not just _running) atomically so two
+        # concurrent /api/scan/start requests or a photo_scan racing with
+        # start_scan cannot both pass the guard in the ~1ms window.
         with self._lock:
-            if self._running:
+            if self._mode != "idle":
                 return False
             self.events = []
             self.all_gaussians = []
             self.counts = {t.lower(): 0 for t in ALL_TAGS}
+            self._stop_requested = False
             self.state = "scanning"   # ← inside lock (was outside)
             self._running = True      # ← inside lock (was outside)
+            self._mode = "scanning"   # ← BUG-PROD-3 FIX
         # Thread started AFTER lock released — safe.
         self._thread = threading.Thread(
             target=self._run, args=(n_frames, frame_delay_s, source, dataset_path),
             daemon=True)
         self._thread.start()
+        return True
+
+    def stop_scan(self) -> bool:
+        """MISSING-3 FIX: request a graceful stop of the running scan.
+
+        Sets a flag that the frame loop checks after each sleep(). Returns
+        True if a scan was running, False if idle.
+        """
+        with self._lock:
+            if not self._running:
+                return False
+            self._stop_requested = True
         return True
 
     def reveal(self, bbox_min, bbox_max, semantic: Optional[str] = None,
@@ -173,17 +219,29 @@ class RealtimeEngine:
             simulate=SIMULATE, seed=int(time.time()) % 9999)
 
         new_g = self._plane_align(new_g, semantic, rmin, rmax)
+
+        # BUG-PROD-1 FIX: capture counts snapshot INSIDE the lock so that any
+        # concurrent /api/state GET always sees a consistent (all_gaussians,
+        # counts) pair. Previously _emit() was called after releasing the lock,
+        # creating a brief window where the WebSocket event showed more Gaussians
+        # than /api/state counts — causing KPI panel flicker on demos.
+        # BUG-PROD-4 FIX: mark newly generated Gaussians as physics-locked so
+        # subsequent scan cycles don't re-evaluate them and flip GREEN → RED.
+        for g in new_g:
+            g["_physics_locked"] = True
         with self._lock:
             self.all_gaussians.extend(new_g)
             self.counts["green"] = self.counts.get("green", 0) + len(new_g)
+            counts_snapshot = dict(self.counts)  # consistent snapshot
 
         latency_ms = round((time.time() - t0) * 1000, 1)
         result = {
             "type": "reveal_result", "request_id": request_id,
             "semantic": semantic, "tier": tier, "latency_ms": latency_ms,
             "gaussians": [_wire(g) for g in new_g],
+            "counts": counts_snapshot,  # BUG-PROD-1 FIX: consistent count
         }
-        self._emit(result)
+        self._emit(result)  # emitted AFTER counts committed — no race
         self._log(f"Reveal '{semantic}' -> {len(new_g)} GREEN Gaussians "
                   f"via {tier} in {latency_ms}ms")
         return result
@@ -191,88 +249,107 @@ class RealtimeEngine:
     def photo_scan(self, image_path: str) -> Dict[str, Any]:
         """Single-photo mode: monocular depth (Depth Anything V2, open-weight)
         -> back-projected point cloud streamed to the viewer.
-        Visual-only: a single photo has no ground truth, so no KPI score."""
-        # BUG-6 FIX: guard against calling photo_scan while a live scan is
-        # running — replacing all_gaussians mid-scan corrupts the scan thread.
-        if self._running:
-            raise RuntimeError(
-                "Cannot photo_scan while a frame scan is running. "
-                "Wait for the scan to complete or call stop first.")
-        t0 = time.time()
-        import cv2
-        bgr = cv2.imread(image_path)
-        if bgr is None:
-            raise RuntimeError(f"could not read image: {image_path}")
-        # keep it small for CPU depth inference
-        h0, w0 = bgr.shape[:2]
-        scale = 640.0 / max(h0, w0)
-        if scale < 1.0:
-            bgr = cv2.resize(bgr, (int(w0*scale), int(h0*scale)))
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        H, W = rgb.shape[:2]
+        Visual-only: a single photo has no ground truth, so no KPI score.
 
-        try:
-            from transformers import pipeline as hf_pipeline
-            from PIL import Image
-            if not hasattr(self, "_depth_pipe"):
-                self._log("Loading Depth Anything V2 Small (first time: downloads ~100MB)...")
-                self._depth_pipe = hf_pipeline(
-                    "depth-estimation",
-                    model="depth-anything/Depth-Anything-V2-Small-hf")
-            out = self._depth_pipe(Image.fromarray(rgb))
-            depth_rel = np.array(out["depth"], dtype=np.float32)
-        except ImportError as e:
-            raise RuntimeError(
-                "Photo mode needs: pip install torch transformers pillow "
-                f"(missing: {e.name})")
-
-        # Depth Anything outputs INVERSE relative depth (bigger = closer).
-        inv = depth_rel - depth_rel.min()
-        inv = inv / (inv.max() + 1e-9)
-        depth_m = 0.5 + (1.0 - inv) * 3.5          # map into 0.5..4.0 m
-
-        fx = fy = 0.9 * W                            # generic phone intrinsics
-        cx_, cy_ = W / 2.0, H / 2.0
-        stride = max(2, W // 160)
-        pts, cols = [], []
-        for v in range(0, H, stride):
-            for u in range(0, W, stride):
-                d = float(depth_m[v, u])
-                pts.append([(u - cx_) * d / fx,
-                            -(v - cy_) * d / fy + 1.5,   # y-up, camera at 1.5m
-                            d])
-                cols.append((rgb[v, u] / 255.0).tolist())
-        gaussians = [{
-            "position": p, "normal": [0.0, 0.0, -1.0], "color": c,
-            "scale": 0.02, "opacity": 0.95,
-            "confidence": 0.6, "tag": "PHOTO", "semantic": "OTHER",
-        } for p, c in zip(pts, cols)]
-
-        # BUG-6 FIX: hold the lock for the entire state update so a concurrent
-        # WebSocket /api/state read never sees a partially-updated scene.
+        BUG-PROD-3 FIX: guarded by _mode enum (not just _running) to close the
+        ~1ms race window where a scan finishes but _running is not yet False.
+        BUG-PROD-8 FIX: state reset is atomic and exception leaves state='error'
+        rather than an inconsistent partial reset.
+        """
+        # BUG-PROD-3 FIX: use _mode instead of _running for race-free guard
         with self._lock:
+            if self._mode != "idle":
+                raise RuntimeError(
+                    f"Cannot photo_scan while engine is in mode '{self._mode}'. "
+                    "Wait for the scan to complete or call /api/scan/stop first.")
+            # BUG-PROD-8 FIX: reset state atomically while holding the lock so
+            # concurrent WebSocket reads never see a partially-cleared scene.
+            self._mode = "photo"
             self.events = []
-            self.all_gaussians = gaussians
+            self.all_gaussians = []
             self.counts = {t.lower(): 0 for t in ALL_TAGS}
-            # _count() now runs inside the lock (was outside — data race)
-            for g in gaussians:
-                t = g.get("tag", TAG_RED).lower()
-                self.counts[t] = self.counts.get(t, 0) + 1
+            self.state = "scanning"
 
-        wire = [_wire(g) for g in gaussians[:12000]]
-        self._emit({"type": "frame", "frame": 1, "n_frames": 1,
-                    "gaussians": wire, "dynamic": [],
-                    "counts": dict(self.counts)})
-        elapsed = round(time.time() - t0, 2)
-        self._emit({"type": "summary", "counts": dict(self.counts),
-                    "total": len(gaussians), "elapsed_s": elapsed,
-                    "payload_kb": 0,
-                    "kpis": {"note": "photo mode is visual-only — single "
-                                      "photos have no ground truth to score against"}})
-        self._log(f"Photo reconstructed: {len(gaussians)} points in {elapsed}s "
-                  "(monocular depth — relative scale)")
-        self.state = "complete"
-        return {"points": len(gaussians), "elapsed_s": elapsed}
+        t0 = time.time()
+        try:
+            import cv2
+            bgr = cv2.imread(image_path)
+            if bgr is None:
+                raise RuntimeError(f"could not read image: {image_path}")
+            # keep it small for CPU depth inference
+            h0, w0 = bgr.shape[:2]
+            scale = 640.0 / max(h0, w0)
+            if scale < 1.0:
+                bgr = cv2.resize(bgr, (int(w0*scale), int(h0*scale)))
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            H, W = rgb.shape[:2]
+
+            try:
+                from transformers import pipeline as hf_pipeline
+                from PIL import Image
+                if not hasattr(self, "_depth_pipe"):
+                    self._log("Loading Depth Anything V2 Small (first time: downloads ~100MB)...")
+                    self._depth_pipe = hf_pipeline(
+                        "depth-estimation",
+                        model="depth-anything/Depth-Anything-V2-Small-hf")
+                out = self._depth_pipe(Image.fromarray(rgb))
+                depth_rel = np.array(out["depth"], dtype=np.float32)
+            except ImportError as e:
+                raise RuntimeError(
+                    "Photo mode needs: pip install torch transformers pillow "
+                    f"(missing: {e.name})")
+
+            # Depth Anything outputs INVERSE relative depth (bigger = closer).
+            inv = depth_rel - depth_rel.min()
+            inv = inv / (inv.max() + 1e-9)
+            depth_m = 0.5 + (1.0 - inv) * 3.5          # map into 0.5..4.0 m
+
+            fx = fy = 0.9 * W                            # generic phone intrinsics
+            cx_, cy_ = W / 2.0, H / 2.0
+            stride = max(2, W // 160)
+            pts, cols = [], []
+            for v in range(0, H, stride):
+                for u in range(0, W, stride):
+                    d = float(depth_m[v, u])
+                    pts.append([(u - cx_) * d / fx,
+                                -(v - cy_) * d / fy + 1.5,   # y-up, camera at 1.5m
+                                d])
+                    cols.append((rgb[v, u] / 255.0).tolist())
+            gaussians = [{
+                "position": p, "normal": [0.0, 0.0, -1.0], "color": c,
+                "scale": 0.02, "opacity": 0.95,
+                "confidence": 0.6, "tag": "PHOTO", "semantic": "OTHER",
+            } for p, c in zip(pts, cols)]
+
+            # Hold lock for atomic state update
+            with self._lock:
+                self.all_gaussians = gaussians
+                for g in gaussians:
+                    t = g.get("tag", TAG_RED).lower()
+                    self.counts[t] = self.counts.get(t, 0) + 1
+
+            wire = [_wire(g) for g in gaussians[:12000]]
+            self._emit({"type": "frame", "frame": 1, "n_frames": 1,
+                        "gaussians": wire, "dynamic": [],
+                        "counts": dict(self.counts)})
+            elapsed = round(time.time() - t0, 2)
+            self._emit({"type": "summary", "counts": dict(self.counts),
+                        "total": len(gaussians), "elapsed_s": elapsed,
+                        "payload_kb": 0,
+                        "kpis": {"note": "photo mode is visual-only — single "
+                                          "photos have no ground truth to score against"}})
+            self._log(f"Photo reconstructed: {len(gaussians)} points in {elapsed}s "
+                      "(monocular depth — relative scale)")
+            self.state = "complete"
+            return {"points": len(gaussians), "elapsed_s": elapsed}
+        except Exception:
+            # BUG-PROD-8 FIX: leave state=error so the frontend shows a clear
+            # error state rather than the stale partial 'scanning' state.
+            self.state = "error"
+            raise
+        finally:
+            with self._lock:
+                self._mode = "idle"
 
 
     # ── helpers ───────────────────────────────────────────────────────────
@@ -320,15 +397,6 @@ class RealtimeEngine:
             logger.debug(f"plane alignment skipped: {e}")
         return gaussians
 
-    def _count(self, gaussians: List[Dict]):
-        # NEW-BUG-3 FIX: hold the lock so counts dict is always consistent
-        # with all_gaussians. Safe on CPython 3.10-3.12 without this, but
-        # required for Python 3.13+ free-threaded mode (PEP 703).
-        with self._lock:
-            for g in gaussians:
-                t = g.get("tag", TAG_RED).lower()
-                self.counts[t] = self.counts.get(t, 0) + 1
-
     # ── the streaming pipeline ────────────────────────────────────────────
     def _run(self, n_frames: int, frame_delay_s: float,
              source: str = "synthetic", dataset_path: Optional[str] = None):
@@ -341,7 +409,10 @@ class RealtimeEngine:
             self._emit({"type": "stage", "stage": "pipeline",
                         "status": "error", "msg": str(e)})
         finally:
-            self._running = False
+            # BUG-PROD-3 FIX: reset both _running and _mode atomically.
+            with self._lock:
+                self._running = False
+                self._mode = "idle"
 
     def _run_inner(self, n_frames: int, frame_delay_s: float,
                    source: str = "synthetic",
@@ -461,9 +532,11 @@ class RealtimeEngine:
                 _ = detect_echo_peaks(matched_filter(residual, ref_chirp), sample_rate=44100)
 
                 # physics-consistent SAS measurement for this pose
+                # MISSING-6 FIX: use module-level seeded RNG so TEAL cluster
+                # assignments are deterministic across runs.
                 dists = []
                 for tgt in occluded_targets:
-                    d = float(np.linalg.norm(phone_pos - tgt)) + np.random.normal(0, 0.008)
+                    d = float(np.linalg.norm(phone_pos - tgt)) + _ACOUSTIC_RNG.normal(0, 0.008)
                     dists.append(max(0.05, d))
                 sas_measurements.append({"position": phone_pos.tolist(),
                                          "distances": dists, "snr_db": 18.0})
@@ -512,6 +585,12 @@ class RealtimeEngine:
             tagged = []
             cap = min(len(static_g), 2500)
             for g in static_g[:cap]:
+                # BUG-PROD-4 FIX: skip physics evaluation for Gaussians that
+                # were generated by reveal() — re-evaluating them can flip
+                # GREEN → RED (L7 support failure) breaking scene idempotency.
+                if g.get("_physics_locked"):
+                    tagged.append(dict(g))
+                    continue
                 hyp = PhysicsHypothesis(
                     position=np.array(g["position"]),
                     semantic=g.get("semantic", "UNKNOWN"),
@@ -584,6 +663,16 @@ class RealtimeEngine:
                     logger.debug(f"SAS not ready: {e}")
 
             time.sleep(max(0.0, frame_delay_s))
+
+            # MISSING-3 FIX: check stop flag after each frame sleep so the
+            # scan can be cancelled gracefully from /api/scan/stop.
+            with self._lock:
+                should_stop = self._stop_requested
+            if should_stop:
+                with self._lock:
+                    self._stop_requested = False
+                self._log("Scan stopped by user request")
+                break
 
         # NEW-BUG-4 FIX: emit final room_dims BEFORE infill so the frontend
         # can resize the wireframe box to match the real room.
@@ -738,6 +827,17 @@ class RealtimeEngine:
         MAX_BLUE = 12000
         SPACING  = 0.08
         xz_min, xz_max = pts[:, [0, 2]].min(0), pts[:, [0, 2]].max(0)
+
+        # EDGE-CASE FIX: inverted room (ceiling_y < floor_y) produces empty
+        # np.arange and silently generates zero wall Gaussians. Guard it so we
+        # log a clear warning instead of producing a scene with no structure.
+        if self.ceiling_y <= self.floor_y:
+            logger.warning(
+                f"_proactive_blue: ceiling_y ({self.ceiling_y:.3f}) <= "
+                f"floor_y ({self.floor_y:.3f}) — room geometry is inverted, "
+                "skipping infill. Check depth calibration.")
+            return []
+
         for x in np.arange(xz_min[0], xz_max[0] + 1e-6, SPACING):
             for z in np.arange(xz_min[1], xz_max[1] + 1e-6, SPACING):
                 out.append({"position": [float(x), float(self.floor_y), float(z)],
@@ -790,8 +890,11 @@ class RealtimeEngine:
         pred = np.array([g["position"] for g in self.all_gaussians
                          if g.get("tag") != TAG_ORANGE], dtype=np.float64)
         from scipy.spatial import cKDTree
-        d_g2p, _ = cKDTree(pred).query(gt, k=1, workers=-1)
-        d_p2g, _ = cKDTree(gt).query(pred, k=1, workers=-1)
+        # BUG-PROD-7 FIX: workers=-1 raises RuntimeError on Windows when called
+        # from a daemon thread (daemon processes cannot spawn children). Use 1
+        # worker on Windows; all CPUs elsewhere.
+        d_g2p, _ = cKDTree(pred).query(gt, k=1, workers=_KD_WORKERS)
+        d_p2g, _ = cKDTree(gt).query(pred, k=1, workers=_KD_WORKERS)
         prec5, rec5 = float((d_p2g < 0.05).mean()), float((d_g2p < 0.05).mean())
         prec10, rec10 = float((d_p2g < 0.10).mean()), float((d_g2p < 0.10).mean())
         return {

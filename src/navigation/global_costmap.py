@@ -133,8 +133,23 @@ class GlobalCostmap:
         return int(self._grid[ci, cj]) < CELL_INSCRIBED
 
     def _world_to_cell(self, wx: float, wz: float) -> Tuple[int, int]:
-        ci = int((wz - self._oy) / self._res)
-        cj = int((wx - self._ox) / self._res)
+        """BUG-PROD-6 FIX: document the XZ-projection convention explicitly.
+
+        PHANTOM's world coordinate system: Y is up, navigation is on the XZ plane.
+        This costmap projects onto that XZ plane:
+            row (ci) = Z-axis  (north/south depth in the room)
+            col (cj) = X-axis  (east/west width of the room)
+
+        Nav2 OccupancyGrid convention: row = Y-axis (north), col = X-axis (east).
+        When imported by a Nav2 planner, the 'origin_y' metadata must be set to
+        the Z-origin of the room (not the physical Y/height), otherwise the
+        planner interprets rows as physical Y and rotates the map 90 degrees.
+
+        All callers pass (world_x, world_z) explicitly, and origin parameters
+        _ox / _oy are named for their role as X-origin and Z-origin respectively.
+        """
+        ci = int((wz - self._oy) / self._res)   # row = Z (depth)
+        cj = int((wx - self._ox) / self._res)   # col = X (width)
         return ci, cj
 
 
@@ -155,24 +170,43 @@ class LocalCostmap:
                                    floor_y: float = 0.0) -> None:
         """
         Add dynamic object inflation to local costmap.
+
+        MISSING-8 FIX: previously all ORANGE Gaussians were collapsed to a
+        single centroid and inflated as one blob. If two people walk on opposite
+        sides of the room, the single centroid falls between them and the robot
+        drives through the gap thinking both sides are blocked.
+
+        Now uses DBSCAN to cluster ORANGE points by proximity (0.8m radius),
+        then inflates one circle per cluster so each person/object is a
+        separate obstacle in the costmap.
         """
         self._dynamic_cells[:] = 0
 
-        # Group ORANGE Gaussians by proximity into clusters
         if not dynamic_gaussians:
             return
 
         positions = np.array([g["position"] for g in dynamic_gaussians],
-                               dtype=np.float32)
+                              dtype=np.float32)
 
-        # Simple: inflate around centroid
-        if len(positions) > 0:
-            centroid = positions.mean(axis=0)
+        # Cluster ORANGE Gaussians by XZ proximity (0.8m epsilon)
+        try:
+            from sklearn.cluster import DBSCAN
+            xz = positions[:, [0, 2]]  # nav plane only
+            labels = DBSCAN(eps=0.8, min_samples=1).fit_predict(xz)
+        except ImportError:
+            # sklearn not installed: fall back to single-centroid behaviour
+            labels = np.zeros(len(positions), dtype=int)
+            logger.debug("sklearn not installed — LocalCostmap using single-centroid fallback")
+
+        h, w = self._dynamic_cells.shape
+        r = int(self._inflation / self._base._res)
+        for label in set(labels):
+            if label < 0:
+                continue  # DBSCAN noise points — skip
+            cluster_pts = positions[labels == label]
+            centroid = cluster_pts.mean(axis=0)
             ci, cj = self._base._world_to_cell(
-                float(centroid[0]), float(centroid[2])
-            )
-            r = int(self._inflation / self._base._res)
-            h, w = self._dynamic_cells.shape
+                float(centroid[0]), float(centroid[2]))
             for di in range(-r, r + 1):
                 for dj in range(-r, r + 1):
                     if di**2 + dj**2 <= r**2:
