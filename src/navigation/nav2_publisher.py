@@ -72,7 +72,16 @@ def _build_2d_slice(gaussians: List[Any],
         if 0 <= cz < H and 0 <= cx < W:
             lo[cz, cx] += _LOG_ODDS.get(str(tag).upper(), 0.5)
 
-    prob = np.exp(lo) / (1.0 + np.exp(lo))
+    # NAV-SAFETY FIX: the naive sigmoid e^x/(1+e^x) overflows float32 once a
+    # cell accumulates enough log-odds (lo > ~88) — exactly the densest, most
+    # CERTAIN obstacle cells (thick walls, dense floor infill). exp(lo)->inf,
+    # then inf/(1+inf)=NaN, and every NaN threshold compare below is False, so
+    # the cell silently stays UNKNOWN (-1) instead of LETHAL (100). A Nav2
+    # planner could then route the robot straight through a confirmed wall.
+    # Use the numerically-stable logistic form (clip the exponent) so the most
+    # certain cells correctly saturate to prob≈1.0 → LETHAL.
+    prob = 1.0 / (1.0 + np.exp(-np.clip(lo, -60.0, 60.0)))
+    assert np.isfinite(prob).all(), "costmap probability contains NaN/inf"
     grid = np.full((H, W), -1, dtype=np.int8)
     grid[prob > 0.70] = 100
     grid[(prob >= 0.30) & (prob <= 0.70)] = 50

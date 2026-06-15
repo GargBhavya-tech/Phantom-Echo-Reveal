@@ -1,0 +1,28 @@
+{
+  "protocol": "held-out frame (real RGB-D, never seen during reconstruction)",
+  "dataset": "datasets/redwood_sample",
+  "frames_reconstructed": 4,
+  "frames_held_out": 1,
+  "engine_state": "complete",
+  "n_scene_gaussians": 30808,
+  "wall_time_s": 101.95,
+  "metric": {
+    "f1_5cm": 0.7711,
+    "f1_10cm": 0.9899,
+    "precision_5cm": 0.632,
+    "recall_5cm": 0.9888,
+    "recon_err_cm": 1.76,
+    "n_pred": 16250,
+    "protocol": "held-out frame (never seen during reconstruction); primary metric over directly-sensed reconstruction (WHITE/TEAL/RED/YELLOW), GT depth capped at 5m",
+    "n_gt_points": 4016,
+    "full_scene": {
+      "f1_5cm": 0.5708,
+      "f1_10cm": 0.8696,
+      "precision_5cm": 0.4004,
+      "recall_5cm": 0.9933,
+      "recon_err_cm": 1.69,
+      "n_pred": 30808
+    }
+  },
+  "note": "This is a BLIND metric: ground truth is a real depth frame the reconstruction never observed. Contrast with output/eval_results.json which is a closed-loop synthetic consistency check."
+}
