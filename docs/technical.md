@@ -19,7 +19,7 @@ impossible, measures what acoustics can reach, and only generates what remains.
 ### Layer Stack
 
 ```
-Layer 6: WebGPU gsplat.js Demo Viewer (src/edge/ui/viewer.html)
+Layer 6: Three.js/WebGL Live Dashboard (src/frontend/index.html)
     ↑
 Layer 5: Active Perception — ROS2 Nav2 navigation hints
     ↑
@@ -66,10 +66,10 @@ LAYER 1 ── DDGS GaussRender
                           ▼
 LAYER 2 ── PHANTOM-LITE Contradiction Engine (8 physics laws)
   ┌───────────────────────────────────────────────────────┐
-  │  gravity · no-penetration · structural support        │
-  │  occlusion boundary · perspective continuity          │
-  │  acoustic SAS · surface normal · compactness          │
-  │                              → BLUE / YELLOW / RED    │
+  │  L1 gravity · L2 occlusion geom · L3 shadow geom      │
+  │  L4 light propagation · L5 acoustic mirror            │
+  │  L6 no-penetration · L7 support · L8 symmetry prior   │
+  │                        → BLUE / TEAL / YELLOW / RED   │
   └───────────────────────────────────────────────────────┘
                           ▼
 LAYER 3 ── Semantic Affordance Router + VideoScene
@@ -89,7 +89,7 @@ LAYER 5 ── Active Perception (ROS2 Nav2)
   Mode A: human taps RED zone → robot moves → resurvey
   Mode B: robot resolves own blind spots autonomously
                           ▼
-LAYER 6 ── WebGPU gsplat.js Viewer
+LAYER 6 ── Three.js/WebGL Viewer
   QR code → judge phone → tap occluded object → reveal < 3s
 ```
 
@@ -159,7 +159,57 @@ Consecutive-pair subtraction → linear system:
 Solve: Q = (AᵀA)⁻¹Aᵀb, refine with Levenberg-Marquardt
 ```
 
-Achieves ~1.2cm residual error in simulation.
+Achieves ~0.1–0.2 cm DSP-recovery error in a **controlled acoustic simulation**
+(forward model synthesises the mic signal; inverse model recovers range via
+matched-filter + ISM rejection — see `acoustic_forward.py` and CHANGELOG). It
+does **not** model wave diffraction of the direct path around a solid occluder;
+real-phone validation is hardware work and is stated as a known limitation.
+
+---
+
+## 3b. Agentic Layer — Prove→Measure→Imagine as tool use (`src/agent/`)
+
+The pipeline is wrapped by a tool-using agent that makes the *Prove → Measure →
+Imagine* philosophy an explicit, inspectable reasoning loop rather than hardcoded
+control flow. This is the system's **agentic workflow / reasoning pipeline / tool
+use** surface.
+
+**Tools** (`src/agent/tools.py`) — each a thin wrapper around a real pipeline
+module, returning a JSON observation and reporting its own applicability:
+
+| Tool | Wraps | Returns |
+|------|-------|---------|
+| `inspect_region` | — (pure geometry) | size, volume, near floor/wall/ceiling, kind |
+| `apply_physics` | `contradiction_engine` (8 laws) | verdict PROVEN/POSSIBLE/IMPOSSIBLE + tag |
+| `acoustic_measure` | `acoustic_forward` + `sas_triangulator` | recovered surface point + cm error (or honest decline for solid interiors) |
+| `generate_geometry` | `videoscene_pipeline_fixed` | n GREEN splats + tier (or decline if region too large to imagine) |
+| `plan_viewpoint` | next-best-view heuristic | robot waypoint + info-gain (Mode B) |
+
+**Planner loop** (`src/agent/planner.py`) — a Reason → Act → Observe loop per
+region: choose one tool, execute it, observe, repeat until a tool resolves the
+region, then `finalize` with a tag. The decision procedure is the thesis itself:
+PROVE (PROVEN ⇒ BLUE) → MEASURE (surface recovered ⇒ TEAL) → IMAGINE (splats ⇒
+GREEN) → EXPLORE (otherwise ⇒ RED + waypoint).
+
+**Two policies, one tool surface:**
+- **DeterministicPolicy** — the Prove→Measure→Imagine procedure. Offline, no API
+  key, reproducible. Default.
+- **LLMPolicy** — Claude (`claude-opus-4-8`) chooses the next tool via forced
+  tool-use (`tool_choice` = a `decide` tool with an enum of tool names). Enabled
+  with `PHANTOM_AGENT_LLM=claude` + `ANTHROPIC_API_KEY`; falls back to the
+  deterministic policy on any error, so the offline path never breaks.
+
+Because both policies observe the *same* tool results, the LLM never sees a
+hidden answer — it sequences genuine tool calls and interprets honest outcomes
+(e.g. acoustics decline a solid interior → the agent proceeds to generation; a
+region too large to imagine → the agent defers to robot exploration).
+
+```bash
+python -m src.main --mode agent     #  -> output/agent_trace.json
+```
+
+Regression-locked by `tests/test_integrity.py::test_agent_tool_use_resolves_all_paths`
+(asserts all four resolution paths fire and all pipeline tools are called).
 
 ---
 
@@ -225,26 +275,30 @@ post-hoc filter, but as hard bounds the model must respect.
 
 ## 7. KPI Results
 
-Evaluated on simulation (Blender ground-truth) and cross-dataset
-(ReplicaCAD, Matterport3D):
+Two evaluations are reported (see README for the full discussion). The
+**real held-out** column is the accuracy headline; the synthetic column is a
+closed-loop self-consistency check (ground truth == the simulator's own scene).
 
-| Metric | Target | Achieved | Atlas Baseline | Improvement |
-|--------|--------|----------|---------------|-------------|
-| F1 Score | > 0.97 | Run `python -m src.eval.run_eval` | 0.85 | — |
-| Semantic Accuracy | > 93% | Run `python -m src.eval.run_eval` | 80% | — |
-| Reconstruction Error | < 1.5cm | Run `python -m src.eval.run_eval` | 5.0cm | — |
+| Metric | Target | Synthetic (closed-loop) | Real held-out (blind) | Atlas |
+|--------|--------|-------------------------|------------------------|-------|
+| F1 @ 5cm | ≥ 0.85 | 0.858 mean (1/3 scenes clear @5cm) | **0.957** | 0.85 |
+| F1 @ 10cm | ≥ 0.85 | 0.879 mean | **0.998** | — |
+| Semantic accuracy | ≥ 93% | 95.7% mean | — | 80% |
+| Reconstruction error | < 1.5cm | ~0.0cm (analytic — circular) | **0.98 cm** | 5.0cm |
 
-> Numbers are generated live by `run_eval.py` which calls `run_full_pipeline()` and
-> measures Chamfer F1 against synthetic ground truth. This is a simulation prototype
-> — results reflect what the pipeline actually produces, not aspirational targets.
+> Quote the **real held-out** column (`output/real_data_eval.json`). The
+> synthetic column (`output/eval_results.json`) reports `all_kpis_met: false`
+> because office/bedroom clear 0.85 only at 10 cm; its ~0 cm error is a lower
+> bound by construction (GT == the simulator's scene), not a generalisation
+> claim. Regenerate both with `./reproduce.sh` (or `reproduce.ps1` on Windows).
 
 ---
 
 ## 8. Installation
 
 ### Requirements
-- Python 3.10+
-- Node.js 18+ (for WebGPU viewer)
+- Python 3.10+  (no Node.js — the dashboard is a single zero-build HTML file
+  that loads Three.js from a CDN)
 - Ubuntu 22.04 / macOS 13+ / Windows 11
 
 ### Quick start (simulation mode — no hardware needed)
@@ -254,14 +308,15 @@ git clone https://github.com/YOUR_USERNAME/phantom-echo-reveal
 cd phantom-echo-reveal
 pip install -r requirements.txt
 python -m src.main --mode demo
-# Open src/edge/ui/viewer.html in Chrome/Firefox for 3D viewer
+# Live dashboard: python -m src.main --mode realtime  ->  http://localhost:8000
 ```
 
 ### Run evaluation
 
 ```bash
-python -m src.eval.evaluate --mode simulation --scene living_room_01
-# Results written to eval_results.json
+python -m src.main --mode eval          # synthetic 3-scene self-consistency
+python -m src.eval.run_real_eval --dataset datasets/redwood_sample --frames 4
+# Results: output/eval_results.json (synthetic), output/real_data_eval.json (blind)
 ```
 
 ### Full hardware mode (iPhone 12 Pro+ required)
@@ -272,20 +327,22 @@ See [User Guide](user_guide.md) for iOS ARKit integration instructions.
 
 ## 9. Open Source Attribution
 
-This project builds on the following open-source libraries and models:
+All models below are **open-weight** and are loaded only behind env flags /
+lazily; the default offline (simulate) mode downloads none of them. No existing
+open-source project was used as a code base — algorithmic ideas (3D Gaussian
+Splatting, Kerbl et al. 2023; Screened Poisson Surface Reconstruction, Kazhdan &
+Hoppe 2013; the Image Source Method, Allen & Berkley 1979; Synthetic Aperture
+Sonar) are **re-implemented in this repo**.
 
-| Component | Source | License |
-|-----------|--------|---------|
-| FusionSegNet v5 | Internal prior work (Bhavya Garg) | MIT |
-| LLaVA-NeXT-Video | HuggingFace: llava-hf/LLaVA-NeXT-Video-7B-hf | Apache 2.0 |
-| MobileSAM | HuggingFace: dhkim2810/MobileSAM | Apache 2.0 |
-| MobileCLIP | HuggingFace: apple/MobileCLIP-S2 | Apple ML Research License |
-| VideoScene | HuggingFace: stabilityai/stable-video-diffusion-img2vid | CC-BY-NC-4.0 |
-| gsplat | GitHub: nerfstudio-project/gsplat | Apache 2.0 |
-| pyroomacoustics | GitHub: LCAV/pyroomacoustics | MIT |
-| Open3D | open3d.org | MIT |
-| numpy, scipy | numpy.org, scipy.org | BSD |
-| FastAPI | fastapi.tiangolo.com | MIT |
+| Component | Source | License | How used |
+|-----------|--------|---------|----------|
+| MobileSAM | HF: dhkim2810/MobileSAM | Apache 2.0 | optional segmentation (env-gated) |
+| MobileCLIP-S2 | HF: apple/MobileCLIP-S2 | Apple ML Research | optional embedding (env-gated) |
+| LLaVA-NeXT-Video-7B | HF: llava-hf/LLaVA-NeXT-Video-7B-hf | Apache 2.0 | scene-description prompt (lazy/env-gated) |
+| Stable Video Diffusion | HF: stabilityai/stable-video-diffusion-img2vid | CC-BY-NC-4.0 | Tier-2 generation fallback (GPU) |
+| Depth-Anything-V2-Small | HF: depth-anything/Depth-Anything-V2-Small-hf | Apache 2.0 | real monocular depth (env-gated) |
+| Open3D / numpy / scipy / scikit-learn | open3d.org / numpy / scipy | MIT / BSD | SPSR meshing, KD-trees, math |
+| FastAPI / uvicorn | fastapi.tiangolo.com | MIT | live dashboard server |
 
 ---
 
@@ -293,12 +350,13 @@ This project builds on the following open-source libraries and models:
 
 | Dataset | Source | License | Usage |
 |---------|--------|---------|-------|
-| ReplicaCAD | Meta Research | CC-BY 4.0 | Evaluation ground truth |
-| Matterport3D | Matterport | Research License | Cross-dataset eval |
-| ScanNet v2 | Technical University Munich | CC-BY-NC-SA | Cross-dataset eval |
+| Redwood RGB-D (sample) | redwood-data.org/3dscan | public | **real held-out evaluation** (the blind F1@5cm 0.957) |
+| ScanNet v2 | scan-net.org | ScanNet ToU | reference protocol for independent GT (see README) |
 
-No proprietary datasets were used. All evaluation datasets are publicly
-available with compatible research licenses.
+The synthetic 3-scene benchmark uses **procedurally generated** rooms (no
+external dataset; see `src/eval/run_eval.py` + `DEFAULT_FURNITURE`). ReplicaCAD /
+Matterport3D are compatible future cross-dataset targets but are **not** part of
+any reported number. No proprietary datasets were used.
 
 ---
 
@@ -317,14 +375,20 @@ phantom-echo-reveal/
 │   │   ├── phantom_lite/
 │   │   │   ├── contradiction_engine.py # 8 Physics Laws (Layer 2)
 │   │   │   └── affordance_router.py    # Semantic routing (Layer 3)
-│   │   └── ui/
-│   │       └── viewer.html            # WebGL/WebGPU 3D viewer (Layer 6)
+│   │   └── ui/                        # (retired — live viewer is src/frontend/)
+│   ├── frontend/
+│   │   └── index.html                # Three.js/WebGL live dashboard (Layer 6)
+│   ├── realtime/
+│   │   ├── engine.py                 # streaming pipeline + WebSocket events
+│   │   └── server.py                 # FastAPI hub
 │   ├── cloud/
 │   │   └── generation/
-│   │       └── videoscene_pipeline.py  # Cloud generation + validation
+│   │       └── videoscene_pipeline_fixed.py  # 3-tier generation + validation
 │   ├── eval/
-│   │   └── evaluate.py                # F1, semantic acc, recon error
-│   └── main.py                        # Full pipeline orchestrator
+│   │   ├── run_eval.py                # synthetic F1 / semantic / recon
+│   │   └── run_real_eval.py           # blind held-out real-RGB-D F1 + mesh
+│   ├── main.py                        # CLI entry (demo|eval|realtime)
+│   └── main_v2.py                     # full batch pipeline orchestrator
 ├── docs/
 │   ├── technical.md                   # This file
 │   ├── ax.md                          # AI/agentic workflow reflection
@@ -505,8 +569,15 @@ Also fixed from the review's edge-case list: SPSR <100-point guard, and a new
 Atlanta-World positional relabel pass (Layer 2b) after observing oblique-wall
 normal noise mislabelling wall points as OTHER (office semantic 0.84 → 0.998).
 
-Final 3-scene benchmark after v22.2: **F1@5cm 0.903 · F1@10cm 0.930 ·
-semantic 99.9% · median error 0.01cm** — all KPIs met, all reproducible.
+Final 3-scene benchmark after v22.2: F1@5cm 0.903 · F1@10cm 0.930 ·
+semantic 99.9% · median error 0.01cm.
+
+> **Superseded (v29) — read this:** the current committed
+> `output/eval_results.json` reports mean **F1@5cm 0.858** (only 1/3 scenes
+> clear the 0.85 gate at 5 cm; all clear at 10 cm), with `all_kpis_met: false`.
+> The synthetic benchmark is a self-consistency check; the accuracy headline is
+> the **real held-out** F1@5cm **0.957** (§7). These historical version numbers
+> are kept for the engineering trail, not as live KPIs.
 
 ### v22.3 — production-audit pass
 

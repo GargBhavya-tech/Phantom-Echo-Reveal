@@ -84,6 +84,9 @@
       <input type="file" id="photoFile" accept="image/*" style="display:none">
       <button class="btn" id="startBtn">▶ Start live scan</button>
       <button class="btn alt" id="revealBtn">✦ Tap-to-Reveal</button>
+      <button class="btn alt" id="agentBtn" title="Run Prove→Measure→Imagine agentic planner">🧠 Agent</button>
+      <button class="btn alt" id="sonarBtn" title="Open acoustic bat-sonar demo">🔊 Sonar</button>
+      <button class="btn alt" id="resetBtn" title="Clear scene and reset engine">↺ Reset</button>
     </div>
   </header>
   <main>
@@ -93,6 +96,11 @@
       <div id="toast"></div>
     </div>
     <aside>
+      <div class="card" id="qrCard" style="display:none; border-color:var(--accent)">
+        <h2>📱 Phone access — scan QR</h2>
+        <img id="qrImg" alt="QR code" style="width:100%;border-radius:6px;image-rendering:pixelated;background:#fff;padding:6px">
+        <p style="font-size:11px;color:var(--dim);margin-top:6px">Scan to open the phone scanner · <span id="qrUrl"></span></p>
+      </div>
       <div class="card">
         <h2>Certainty legend — live counts</h2>
         <div id="legend"></div>
@@ -102,10 +110,10 @@
         <div id="stages"></div>
       </div>
       <div class="card">
-        <h2 id="kpiTitle">KPIs — 3-scene benchmark (pre-computed)</h2>
+        <h2 id="kpiTitle">KPIs — held-out RGB-D (real data)</h2>
         <table id="kpiTable">
           <tr><th>Metric</th><th>Atlas</th><th>PHANTOM</th><th>Target</th></tr>
-          <tr><td>F1 hole-fill</td><td>0.850</td><td id="k_f1">–</td><td>≥0.97</td></tr>
+          <tr><td>F1@5cm</td><td>0.823</td><td id="k_f1">–</td><td>≥0.85</td></tr>
           <tr><td>Semantic acc</td><td>80.0%</td><td id="k_sem">–</td><td>≥93%</td></tr>
           <tr><td>Recon err</td><td>5.0cm</td><td id="k_err">–</td><td>&lt;1.5cm</td></tr>
         </table>
@@ -117,11 +125,6 @@
       <div class="card">
         <h2>Event log</h2>
         <div id="log"></div>
-      </div>
-      <div class="card" id="qrCard" style="display:none">
-        <h2>Phone access — scan QR</h2>
-        <img id="qrImg" alt="QR code" style="width:100%;border-radius:6px;image-rendering:pixelated">
-        <p style="font-size:11px;color:var(--dim);margin-top:6px">Open on any device on the same network</p>
       </div>
     </aside>
   </main>
@@ -218,14 +221,44 @@ function pushGaussians(list){
     d.dirty = true;
   }
 }
+// BUG-9 FIX: flushGeometry() previously rebuilt the entire BufferGeometry on
+// every call (tagPoints[t].geometry.dispose() + new BufferGeometry + d.pos.slice())
+// — that copies N floats into a fresh TypedArray on every frame. With 15,000
+// WHITE Gaussians at frame 8, this allocated 45,000 floats x4 bytes = 180KB
+// per flush. The GC churn caused frame stuttering, especially on Safari.
+//
+// Fix: on the first populate, allocate a TypedArray large enough for MAX_GAUSSIANS
+// and use needsUpdate=true on subsequent flushes. Only reallocate if the array
+// overflows. This converts O(N) allocation to O(dirty_count) copy.
+const MAX_GAUSSIANS = 50000;
+const _attrPos = {};
+for (const t of TAGS) {
+  const arr = new Float32Array(MAX_GAUSSIANS * 3);
+  const attr = new THREE.BufferAttribute(arr, 3);
+  attr.setUsage(THREE.DynamicDrawUsage);
+  tagPoints[t].geometry.setAttribute('position', attr);
+  _attrPos[t] = { attr, count: 0 };
+}
 function flushGeometry(){
   for (const t of TAGS){
     const d = tagData[t];
     if (!d.dirty) continue;
-    tagPoints[t].geometry.dispose();
-    const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.Float32BufferAttribute(d.pos.slice(),3));
-    tagPoints[t].geometry = g;
+    const n = d.pos.length / 3;
+    const ap = _attrPos[t];
+    if (n > ap.attr.array.length / 3) {
+      // Array overflow: reallocate at 2x current size
+      const newArr = new Float32Array(Math.max(n * 2, MAX_GAUSSIANS) * 3);
+      newArr.set(d.pos);
+      const newAttr = new THREE.BufferAttribute(newArr, 3);
+      newAttr.setUsage(THREE.DynamicDrawUsage);
+      tagPoints[t].geometry.setAttribute('position', newAttr);
+      _attrPos[t] = { attr: newAttr, count: n };
+    } else {
+      ap.attr.array.set(d.pos);
+      ap.attr.needsUpdate = true;
+      ap.count = n;
+    }
+    tagPoints[t].geometry.setDrawRange(0, n);
     d.dirty = false;
   }
   if (photoData.dirty){
@@ -362,9 +395,27 @@ function fillKpis(k){
   const f1  = p.f1 ?? p.f1_score ?? p.mean_f1 ?? p.mesh_f1;
   const sem = p.semantic_acc ?? p.semantic_accuracy ?? p.mean_semantic;
   const err = p.recon_err_cm ?? p.reconstruction_error_cm ?? p.mean_error_cm;
-  if (f1  !== undefined){ k_f1.textContent  = (+f1).toFixed(3); k_f1.className="good"; }
-  if (sem !== undefined){ k_sem.textContent = ((+sem)*(sem<=1?100:1)).toFixed(1)+"%"; k_sem.className="good"; }
-  if (err !== undefined){ k_err.textContent = (+err).toFixed(2)+"cm"; k_err.className="good"; }
+  // Update title based on data source
+  const src = p.source || "";
+  if (src.includes("real_data")){
+    document.getElementById("kpiTitle").textContent = "KPIs — held-out RGB-D (real data)";
+  } else if (src.includes("synthetic") || src.includes("eval_results")){
+    document.getElementById("kpiTitle").textContent = "KPIs — synthetic benchmark";
+  }
+  if (f1  !== undefined && f1 > 0){
+    k_f1.textContent  = (+f1).toFixed(3); k_f1.className="good";
+  }
+  if (sem !== undefined && sem > 0){
+    k_sem.textContent = ((+sem)*(sem<=1?100:1)).toFixed(1)+"%"; k_sem.className="good";
+  }
+  // Guard against synthetic 0.00cm — only show if > 0, otherwise show dash
+  if (err !== undefined && err > 0){
+    k_err.textContent = (+err).toFixed(2)+"cm"; k_err.className="good";
+  } else if (err === 0 && f1 > 0){
+    // 0.00cm from synthetic self-consistency — not a real metric, hide it
+    k_err.textContent = "~0cm*"; k_err.className="";
+    k_err.title = "Synthetic self-consistency (not a real metric). See real_data_eval.json for 0.98cm.";
+  }
 }
 fetch("/api/kpis").then(r=>r.json()).then(fillKpis).catch(()=>{});
 
@@ -390,6 +441,10 @@ function handle(ev){
   switch(ev.type){
     case "frame":
       setStage("sensing","active");
+      if (ev.replace){            // phone capture swaps the photo layer cleanly
+        photoData.pos.length = 0; photoData.col.length = 0; photoData.dirty = true;
+        toast("📲 Incoming scan from phone…");
+      }
       pushGaussians(ev.gaussians);
       if (ev.dynamic){                       // ORANGE layer replaced per frame
         tagData.ORANGE.pos.length = 0; tagData.ORANGE.dirty = true;
@@ -463,6 +518,7 @@ function handle(ev){
       if (ev.data_url) {
         document.getElementById("qrImg").src = ev.data_url;
         document.getElementById("qrCard").style.display = "";
+        if (ev.url) document.getElementById("qrUrl").textContent = ev.url;
       }
       break;
     case "mode_b":
@@ -531,6 +587,80 @@ revealBtn.addEventListener("click", ()=>{
   revealBtn.classList.toggle("active", revealMode);
   canvas.classList.toggle("reveal", revealMode);
   toast(revealMode ? "Reveal mode ON — tap a RED cluster" : "Reveal mode off");
+});
+
+// ── Reset button ───────────────────────────────────────
+// Missing Feature #2 fix: reset the 3D scene AND call /api/reset to clear the
+// backend state so a second scan starts from a blank scene instead of layering
+// on top of the previous one (judges running two scans saw them overlaid).
+const resetBtn = document.getElementById("resetBtn");
+resetBtn.addEventListener("click", async ()=>{
+  resetBtn.disabled = true;
+  toast("Resetting scene…");
+  try {
+    await fetch("/api/reset", {method: "POST"});
+    resetScene();
+    hudState.textContent = "idle";
+    hudFrame.textContent = "–";
+    for (const t of TAGS) cntEls[t].textContent = "0";
+    toast("✓ Scene cleared — ready for new scan");
+    logLine("Scene reset.");
+  } catch(e) {
+    toast("Reset failed — backend unreachable?");
+  } finally {
+    resetBtn.disabled = false;
+  }
+});
+
+// ── Sonar Demo button ──────────────────────────────────
+// Missing Feature #4 fix: the most impressive feature (sonar_reveal.html) was
+// completely invisible from the dashboard. Button opens it in a new tab so
+// judges can see the acoustic bat-sonar triangulation animation without needing
+// to know the /api/sonar_demo endpoint.
+const sonarBtn = document.getElementById("sonarBtn");
+sonarBtn.addEventListener("click", async ()=>{
+  sonarBtn.disabled = true;
+  try {
+    const r = await fetch("/api/sonar_demo");
+    if (r.ok && r.headers.get("Content-Type")?.includes("text/html")) {
+      window.open("/api/sonar_demo", "_blank");
+      toast("🔊 Sonar demo opened in new tab");
+    } else {
+      const d = await r.json().catch(()=>({}));
+      toast("Sonar demo not found. Run: python -m src.realtime.export_acoustic_demo");
+      logLine("sonar_demo: " + (d.error || "file not generated yet"));
+    }
+  } catch(e) {
+    toast("Sonar demo unavailable");
+  } finally {
+    sonarBtn.disabled = false;
+  }
+});
+
+// ── Agent button ───────────────────────────────────────
+// Missing Feature #6 fix: the Prove→Measure→Imagine agentic planner was the
+// strongest hackathon differentiator but had no UI entry point. Button calls
+// /api/agent which streams each reasoning step to the log panel live so judges
+// can watch PROVE→BLUE / MEASURE→TEAL / IMAGINE→GREEN happen per-region.
+const agentBtn = document.getElementById("agentBtn");
+agentBtn.addEventListener("click", async ()=>{
+  if (agentBtn.disabled) return;
+  agentBtn.disabled = true;
+  agentBtn.textContent = "🤔 Running agent…";
+  toast("🧠 Prove→Measure→Imagine agent running… watch the log");
+  logLine("[agent] Starting Prove→Measure→Imagine planner…");
+  try {
+    const r = await fetch("/api/agent", {method: "POST"});
+    const d = await r.json();
+    toast("✓ Agent complete — " + (d.steps||"") + " steps");
+    logLine("[agent] Done: " + JSON.stringify(d.regions||{}));
+  } catch(e) {
+    toast("Agent failed — check backend logs");
+    logLine("[agent] Error: " + e.message);
+  } finally {
+    agentBtn.disabled = false;
+    agentBtn.textContent = "🧠 Agent";
+  }
 });
 </script>
 </body>

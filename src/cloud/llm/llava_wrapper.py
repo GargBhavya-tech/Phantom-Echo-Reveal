@@ -66,6 +66,17 @@ class LLaVASceneDescriber:
         self._try_load_model()
 
     def _try_load_model(self) -> None:
+        # v28: do NOT auto-download/load the 7B LLaVA model just because
+        # `transformers` happens to be installed (it gets pulled in for the
+        # Depth-Anything backend). On CPU this is a multi-GB download + an
+        # unusably slow load that hangs the demo. Opt in explicitly with
+        # `export PHANTOM_LLM_BACKEND=llava`; otherwise use the fast rule-based
+        # scene describer (the demo never needs a 7B VLM).
+        import os
+        if os.environ.get("PHANTOM_LLM_BACKEND", "").lower() != "llava":
+            logger.info("LLaVA disabled (rule-based scene describer). "
+                        "Set PHANTOM_LLM_BACKEND=llava to load the 7B model.")
+            return
         try:
             from transformers import LlavaNextVideoProcessor, LlavaNextVideoForConditionalGeneration
             import torch
@@ -224,3 +235,75 @@ class LLaVASceneDescriber:
         )
 
         return prompt
+
+    def describe_from_gaussians(self,
+                                gaussians: List[Dict[str, Any]],
+                                rgb_frame: Optional[np.ndarray] = None) -> str:
+        """Section 5.1 — Gaussian-aware scene description.
+
+        Builds a meaningful scene description from the PHANTOM Gaussian tag
+        distribution instead of the zero-info default. This gives VideoScene/FAISS
+        a scene context that reflects what PHANTOM has actually sensed, rather than
+        a generic 'indoor room' string.
+
+        Tag semantics:
+            WHITE  — directly sensed, visible surface
+            TEAL   — acoustic bat-sonar, measured hidden surface
+            GREEN  — VideoScene generated, confirmed plausible
+            RED    — unknown occlusion, currently being revealed
+            BLUE   — structural prior (floor/ceiling/walls)
+            ORANGE — dynamic object (moving person/robot)
+
+        Args:
+            gaussians:  Current scene Gaussian list (from engine.all_gaussians)
+            rgb_frame:  Optional current RGB frame for LLaVA real inference
+
+        Returns:
+            Scene description string
+        """
+        if not gaussians:
+            return self._describe_rule_based([])
+
+        from collections import Counter
+        tags = Counter(g.get("tag", "RED") for g in gaussians)
+        semantics = list({g.get("semantic", "UNKNOWN")
+                          for g in gaussians
+                          if g.get("semantic") not in (None, "UNKNOWN", "OTHER", "OCCLUDED_UNKNOWN")})
+
+        n_total   = len(gaussians)
+        n_sensed  = tags.get("WHITE", 0) + tags.get("TEAL", 0)
+        n_gen     = tags.get("GREEN", 0)
+        n_occl    = tags.get("RED", 0)
+        n_dynamic = tags.get("ORANGE", 0)
+
+        # If real LLaVA is available and we have an RGB frame, use it
+        if self._model is not None and rgb_frame is not None:
+            return self.describe_scene(rgb_frame, semantic_labels=semantics)
+
+        # Gaussian-aware rule-based description
+        parts = []
+        coverage = round(100 * n_sensed / max(n_total, 1))
+        parts.append(
+            f"Indoor scene with {coverage}% direct sensor coverage "
+            f"({n_sensed} sensed, {n_gen} generated, {n_occl} unknown regions"
+            + (f", {n_dynamic} dynamic objects" if n_dynamic > 0 else "") + ")."
+        )
+
+        if semantics:
+            parts.append(self._describe_rule_based(semantics[:8]))
+        else:
+            parts.append("Typical indoor scene: furniture and structural surfaces visible.")
+
+        if n_occl > 0:
+            parts.append(
+                f"There are {n_occl} unknown Gaussians (RED) representing "
+                f"occluded or unresolved regions awaiting generation."
+            )
+        if tags.get("TEAL", 0) > 0:
+            parts.append(
+                f"Acoustic bat-sonar has measured {tags['TEAL']} hidden surface "
+                f"point(s) behind visible obstacles."
+            )
+
+        description = " ".join(parts)
+        return strip_metric_claims(description)

@@ -420,15 +420,56 @@ class SlotLSTMTracker:
         return [t for t in self._tracks if t.confirmed]
 
     def _embed_crop(self, rgb_image: np.ndarray, detection: Dict) -> Optional[np.ndarray]:
-        """Try MobileCLIP embedding of detection crop (silent fallback)."""
+        """Section 5.1 fix: MobileCLIP embedding of the detection RGB crop.
+
+        Previously returned a random hash, making appearance matching useless.
+        Now:
+        1. Projects the 3D bounding box to image coordinates using stored pixels
+        2. Crops the RGB frame to the detection extent
+        3. Runs MobileCLIPEmbedder.embed_image() on the crop
+        4. Falls back to hash embedding on any failure (fail-open)
+        """
         try:
-            pts = detection.get("points_3d")
-            if pts is None or len(pts) == 0:
+            pixels = detection.get("pixels")   # (K, 2) array of [row, col] indices
+            if pixels is None or len(pixels) == 0:
                 return None
-            # Placeholder: real deployment uses MobileCLIP on cropped RGB
-            rng = np.random.default_rng(abs(hash(str(pts[:3].tolist()))) % (2**31))
-            return rng.normal(0, 1, 512).astype(np.float32)
-        except Exception:
+
+            # Compute tight image-space bounding box from pixel indices
+            r_min = int(pixels[:, 0].min())
+            r_max = int(pixels[:, 0].max()) + 1
+            c_min = int(pixels[:, 1].min())
+            c_max = int(pixels[:, 1].max()) + 1
+
+            H, W = rgb_image.shape[:2]
+            r_min = max(0, r_min);  r_max = min(H, r_max)
+            c_min = max(0, c_min);  c_max = min(W, c_max)
+
+            if (r_max - r_min) < 4 or (c_max - c_min) < 4:
+                return None   # crop too tiny to embed meaningfully
+
+            crop = rgb_image[r_min:r_max, c_min:c_max]
+
+            from src.edge.embedding.mobile_clip import MobileCLIPEmbedder
+            emb = MobileCLIPEmbedder().embed_image(crop)
+            return emb
+
+        except Exception as e:
+            logger.debug(f"_embed_crop MobileCLIP failed ({e}), using hash fallback")
+            # Hash fallback: deterministic from 3D position so similar positions
+            # get similar embeddings — better than pure random.
+            try:
+                pts = detection.get("points_3d")
+                if pts is not None and len(pts) > 0:
+                    import hashlib
+                    h = hashlib.sha256(pts[:3].astype(np.float32).tobytes()).digest()
+                    rng = np.random.default_rng(
+                        np.frombuffer(h[:8], dtype=np.uint64)[0])
+                    v = rng.normal(0, 1, 512).astype(np.float32)
+                    return v / (np.linalg.norm(v) + 1e-9)
+            except Exception as e:
+                # Deterministic fallback embedding is best-effort — on any failure
+                # return None so the caller skips appearance matching for this track.
+                logger.debug(f"fallback embedding skipped: {e}")
             return None
 
     def get_dynamic_gaussian_mask(self,

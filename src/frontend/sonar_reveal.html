@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>PHANTOM-ECHO · Sonar Reveal</title>
+<style>
+  :root{
+    --bg:#070b14; --panel:#0d1424; --line:#1d2942; --txt:#cdd9f0; --dim:#5f7196;
+    --teal:#1fd6c9; --blue:#3b82f6; --white:#eef4ff; --amber:#ffb454; --red:#ff5a6e;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 700px at 50% -10%,#0e1830,#070b14 60%);
+       color:var(--txt);font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  .wrap{max-width:1060px;margin:0 auto;padding:22px}
+  h1{font-size:20px;margin:0 0 2px;letter-spacing:.3px}
+  h1 b{color:var(--teal)}
+  .sub{color:var(--dim);margin:0 0 16px;font-size:13px}
+  .grid{display:grid;grid-template-columns:1.35fr 1fr;gap:16px}
+  @media(max-width:880px){.grid{grid-template-columns:1fr}}
+  .card{background:linear-gradient(180deg,#0e1626,#0b1120);border:1px solid var(--line);
+        border-radius:14px;padding:14px}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim);
+           margin:0 0 10px;font-weight:600}
+  canvas{width:100%;display:block;border-radius:10px;background:#060a12}
+  .hud{display:flex;gap:18px;flex-wrap:wrap;margin-top:12px}
+  .stat{flex:1;min-width:120px;background:#0a1120;border:1px solid var(--line);
+        border-radius:10px;padding:10px 12px}
+  .stat .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.6px}
+  .stat .v{font-size:20px;font-weight:700;margin-top:2px}
+  .v.teal{color:var(--teal)} .v.amber{color:var(--amber)} .v.white{color:var(--white)}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:12px;color:var(--dim);font-size:12px}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+  .controls{display:flex;gap:10px;margin-top:14px;align-items:center}
+  button{background:var(--teal);color:#04201e;border:0;border-radius:9px;padding:9px 16px;
+         font-weight:700;cursor:pointer;font-size:13px}
+  button.ghost{background:#13203a;color:var(--txt)}
+  .cap{color:var(--dim);font-size:12px;margin-top:10px}
+  .ping{color:var(--teal);font-weight:700}
+  .note{font-size:11.5px;color:var(--dim);margin-top:8px;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>PHANTOM-ECHO · <b>Sonar Reveal</b></h1>
+  <p class="sub">Watch sound measure a surface the camera can't see. Every waveform and
+     distance below is produced by the real matched-filter → ISM → triangulation pipeline.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Top-down room · acoustic echolocation</h2>
+      <canvas id="room" width="620" height="460"></canvas>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--white)"></i>phone (you)</span>
+        <span><i class="dot" style="background:var(--amber)"></i>sound wavefront</span>
+        <span><i class="dot" style="background:#6b7a99"></i>sofa (occluder)</span>
+        <span><i class="dot" style="background:var(--teal)"></i>surface heard by sound</span>
+        <span><i class="dot" style="background:var(--red)"></i>true surface</span>
+      </div>
+      <p class="note" id="note"></p>
+    </div>
+
+    <div class="card">
+      <h2>Live echo · matched-filter return</h2>
+      <canvas id="scope" width="500" height="180"></canvas>
+      <div class="hud">
+        <div class="stat"><div class="k">Detected range</div><div class="v amber" id="rng">—</div></div>
+        <div class="stat"><div class="k">Echoes used</div><div class="v white" id="cnt">0</div></div>
+      </div>
+      <div class="hud">
+        <div class="stat"><div class="k">Surface error vs truth</div><div class="v teal" id="err">—</div></div>
+        <div class="stat"><div class="k">Confidence</div><div class="v teal" id="conf">—</div></div>
+      </div>
+      <div class="controls">
+        <button id="play">▶ Play reveal</button>
+        <button class="ghost" id="replay">↻ Replay</button>
+      </div>
+      <p class="cap" id="status">Press play. The phone walks a 3-D arc, pinging as it goes.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+// Real acoustic data is inlined here by export_acoustic_demo.py (build_html).
+// If the placeholder wasn't filled, we fall back to fetching the JSON.
+let DATA = /*__ACOUSTIC_DATA__*/ null;
+
+const $ = id => document.getElementById(id);
+
+async function boot(){
+  if(!DATA){
+    try{ DATA = await (await fetch('../output/acoustic_demo.json')).json(); }
+    catch(e){ $('status').textContent =
+      'Could not load acoustic_demo.json — run: python -m src.realtime.export_acoustic_demo'; return; }
+  }
+  init(DATA);
+}
+
+function init(D){
+  const room = $('room'), rc = room.getContext('2d');
+  const scope = $('scope'), sc = scope.getContext('2d');
+  const RW = room.width, RH = room.height, pad = 30;
+  const rx = D.room.x, rz = D.room.z;
+  const sx = v => pad + v/rx*(RW-2*pad);
+  const sy = v => pad + v/rz*(RH-2*pad);
+
+  const occ = D.occluder, tgt = D.target_true, tri = D.triangulated;
+  const frames = D.frames;
+  let fi = 0, t = 0, playing = false, revealed = false, used = 0;
+  const rings = [];        // active wavefronts {x,z,r,life,hue}
+  const ranges = [];       // accumulated range circles {x,z,d}
+
+  // Per-replay state: randomised on each ▶ Play press.
+  // ONLY the visual animation varies — measured distances/errors are always
+  // the real baked-in DSP results so the demo is honest every run.
+  let _pingInterval = 34;    // ticks between pings (randomised per play)
+  let _scopeJitter  = 0.0;   // tiny amplitude wobble added to scope rendering
+  let _replayCount  = 0;     // lets us tint wavefronts slightly per replay
+
+  function drawRoom(){
+    rc.clearRect(0,0,RW,RH);
+    // floor grid
+    rc.strokeStyle='#0f1a30'; rc.lineWidth=1;
+    for(let g=0;g<=rx;g+=0.5){rc.beginPath();rc.moveTo(sx(g),sy(0));rc.lineTo(sx(g),sy(rz));rc.stroke();}
+    for(let g=0;g<=rz;g+=0.5){rc.beginPath();rc.moveTo(sx(0),sy(g));rc.lineTo(sx(rx),sy(g));rc.stroke();}
+    // room border
+    rc.strokeStyle='#27406e'; rc.lineWidth=2;
+    rc.strokeRect(sx(0),sy(0),sx(rx)-sx(0),sy(rz)-sy(0));
+    // sofa occluder
+    rc.fillStyle='#48566f'; rc.strokeStyle='#6b7a99'; rc.lineWidth=2;
+    rc.fillRect(sx(occ.x0),sy(occ.z0),sx(occ.x1)-sx(occ.x0),sy(occ.z1)-sy(occ.z0));
+    rc.strokeRect(sx(occ.x0),sy(occ.z0),sx(occ.x1)-sx(occ.x0),sy(occ.z1)-sy(occ.z0));
+    rc.fillStyle='#8090ad'; rc.font='11px sans-serif';
+    rc.fillText('sofa', sx((occ.x0+occ.x1)/2)-12, sy((occ.z0+occ.z1)/2)+4);
+
+    // true surface (faint until revealed)
+    rc.fillStyle = revealed ? 'rgba(255,90,110,.9)' : 'rgba(255,90,110,.25)';
+    rc.beginPath(); rc.arc(sx(tgt[0]),sy(tgt[1]),6,0,7); rc.fill();
+
+    // accumulated range circles
+    ranges.forEach(r=>{
+      rc.strokeStyle='rgba(255,180,84,.18)'; rc.lineWidth=1;
+      rc.beginPath(); rc.arc(sx(r.x),sy(r.z), r.d/rx*(RW-2*pad), 0, 7); rc.stroke();
+    });
+
+    // active wavefronts — hue varies slightly per replay to look fresh
+    rings.forEach(R=>{
+      const alpha = R.life.toFixed(2);
+      rc.strokeStyle=`rgba(${R.rgb},${alpha})`; rc.lineWidth=2;
+      rc.beginPath(); rc.arc(sx(R.x),sy(R.z), R.r/rx*(RW-2*pad), 0, 7); rc.stroke();
+    });
+
+    // walked path so far
+    rc.strokeStyle='rgba(238,244,255,.35)'; rc.lineWidth=1.5; rc.beginPath();
+    for(let k=0;k<=Math.min(fi,frames.length-1);k++){
+      const f=frames[k]; const X=sx(f.phone[0]),Y=sy(f.phone[1]);
+      k? rc.lineTo(X,Y): rc.moveTo(X,Y);
+    } rc.stroke();
+
+    // phone dot
+    const f = frames[Math.min(fi,frames.length-1)];
+    rc.fillStyle='#eef4ff'; rc.beginPath(); rc.arc(sx(f.phone[0]),sy(f.phone[1]),5,0,7); rc.fill();
+    rc.strokeStyle='rgba(238,244,255,.5)'; rc.beginPath();
+    rc.arc(sx(f.phone[0]),sy(f.phone[1]),8,0,7); rc.stroke();
+
+    // triangulated surface reveal
+    if(revealed && tri){
+      const X=sx(tri.position[0]), Y=sy(tri.position[1]);
+      const pulse = 6+3*Math.sin(t/6);
+      rc.shadowColor='#1fd6c9'; rc.shadowBlur=18;
+      rc.fillStyle='#1fd6c9'; rc.beginPath(); rc.arc(X,Y,pulse,0,7); rc.fill();
+      rc.shadowBlur=0;
+      rc.fillStyle='#bfeee9'; rc.font='11px sans-serif';
+      rc.fillText('heard by sound', X+10, Y+4);
+    }
+  }
+
+  function drawScope(idx){
+    sc.clearRect(0,0,scope.width,scope.height);
+    const f = frames[idx]; if(!f) return;
+    const arr = f.corr, W=scope.width, H=scope.height;
+    sc.strokeStyle='#16223c'; sc.beginPath(); sc.moveTo(0,H-20); sc.lineTo(W,H-20); sc.stroke();
+    // matched-filter — tiny per-replay visual jitter in display amplitude only
+    // (actual measured distance on the x-axis marker is always the real DSP value)
+    sc.strokeStyle='#3b82f6'; sc.lineWidth=1.4; sc.beginPath();
+    let mx = (Math.max(...arr) || 1) * (1 - _scopeJitter * 0.15);
+    arr.forEach((v,i)=>{
+      const X=i/arr.length*W;
+      const Y=H-20-(v/mx)*(H-34);
+      i ? sc.lineTo(X,Y) : sc.moveTo(X,Y);
+    });
+    sc.stroke();
+    // echo peak marker (always the real distance — never jittered)
+    if(f.detected_distance_m!=null){
+      const frac=Math.min(1, f.detected_distance_m/D.room.x);
+      const X=frac*W;
+      sc.strokeStyle='#ffb454'; sc.setLineDash([4,3]);
+      sc.beginPath(); sc.moveTo(X,6); sc.lineTo(X,H-20); sc.stroke(); sc.setLineDash([]);
+      sc.fillStyle='#ffb454'; sc.font='11px sans-serif';
+      sc.fillText('echo '+f.detected_distance_m.toFixed(2)+' m', Math.min(X+6,W-90), 16);
+    }
+    sc.fillStyle='#5f7196'; sc.font='10px sans-serif';
+    sc.fillText('range →', W-58, H-6);
+  }
+
+  function loop(){
+    t++;
+    for(let k=rings.length-1;k>=0;k--){
+      rings[k].r+=0.06; rings[k].life-=0.012;
+      if(rings[k].life<=0) rings.splice(k,1);
+    }
+    if(playing && t%_pingInterval===0){
+      const f=frames[fi];
+      // Wavefront colour: amber (255,180,84) shifted slightly per replay
+      const shift = (_replayCount % 5) * 8;
+      const rgb = `${255},${180+shift},${84+shift*2}`;
+      rings.push({x:f.phone[0], z:f.phone[1], r:0.05, life:0.9, rgb});
+      if(f.detected_distance_m!=null){
+        ranges.push({x:f.phone[0],z:f.phone[1],d:f.detected_distance_m});
+        used++; $('cnt').textContent=used;
+        $('rng').textContent=f.detected_distance_m.toFixed(2)+' m';
+        $('note').innerHTML='<span class="ping">Ping.</span> Echo returned in '+
+          (f.detected_distance_m*2/D.speed_of_sound_mps*1000).toFixed(1)+
+          ' ms → '+f.detected_distance_m.toFixed(2)+' m. The camera cannot see this surface; sound can.';
+      }
+      drawScope(fi);
+      fi++;
+      if(fi>=frames.length){
+        playing=false; revealed=true;
+        if(tri){
+          $('err').textContent=tri.error_cm.toFixed(2)+' cm';
+          $('conf').textContent=tri.confidence.toFixed(2);
+          $('status').innerHTML='<span class="ping">Surface triangulated from '+
+            tri.n_measurements+' echoes — '+tri.error_cm.toFixed(2)+
+            ' cm from the true surface. Measured by sound, never seen.</span>';
+        }
+      }
+    }
+    drawRoom();
+    requestAnimationFrame(loop);
+  }
+
+  function reset(){
+    fi=0;t=0;playing=false;revealed=false;used=0;
+    rings.length=0;ranges.length=0;
+    $('cnt').textContent='0';$('rng').textContent='—';$('err').textContent='—';$('conf').textContent='—';
+    $('note').textContent=D.note;
+    $('status').textContent='Press play. The phone walks a 3-D arc, pinging as it goes.';
+    drawScope(0); drawRoom();
+  }
+
+  $('play').onclick=()=>{
+    if(revealed) reset();
+    playing=true;
+    _replayCount++;
+    // Randomise ping cadence (28–42 ticks) and scope display scale wobble
+    // so every replay looks fresh. The real measured distances / errors never change.
+    _pingInterval = 28 + Math.floor(Math.random() * 14);
+    _scopeJitter  = Math.random();
+    $('status').textContent='Emitting chirps and listening for echoes…';
+  };
+  $('replay').onclick=reset;
+  reset(); loop();
+}
+boot();
+</script>
+</body>
+</html>

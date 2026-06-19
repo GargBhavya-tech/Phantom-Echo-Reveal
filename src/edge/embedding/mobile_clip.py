@@ -65,6 +65,12 @@ class MobileCLIPEmbedder:
             logger.debug(f"MobileCLIP unavailable: {e}")
 
     def _try_clip(self):
+        # v28: don't auto-download openai/clip-vit-base-patch32 (~600MB) just
+        # because transformers is installed. The hash backend is fine for the
+        # demo. Opt in with PHANTOM_EMBED_BACKEND=clip.
+        import os
+        if os.environ.get("PHANTOM_EMBED_BACKEND", "").lower() != "clip":
+            return
         try:
             from transformers import CLIPModel, CLIPProcessor
             self._processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
@@ -185,6 +191,45 @@ class MobileCLIPEmbedder:
         rng = np.random.default_rng(np.frombuffer(digest[:8], dtype=np.uint64)[0])
         v = rng.normal(0, 1, EMBED_DIM).astype(np.float32)
         return self._normalize(v)
+
+    def semantic_search(self,
+                        query_text: str,
+                        candidate_texts: List[str],
+                        top_k: int = 5) -> List[Dict]:
+        """Section 5.1 — Semantic search over candidate strings.
+
+        Embeds the query and all candidates, then returns the top-K candidates
+        ranked by cosine similarity. Works with all three backends.
+
+        Args:
+            query_text:       Text to search for (e.g. "sofa in living room")
+            candidate_texts:  List of candidate strings to rank
+            top_k:            Number of results to return
+
+        Returns:
+            List of dicts sorted by descending similarity:
+                [{"text": str, "score": float, "rank": int}, ...]
+        """
+        if not candidate_texts:
+            return []
+
+        q_vec = self.embed_text(query_text)                    # (512,)
+        c_mat = self.embed_texts_batch(candidate_texts)         # (N, 512)
+
+        # Cosine similarity (vectors are already normalised to unit length)
+        scores = c_mat @ q_vec                                  # (N,)
+
+        top_k_actual = min(top_k, len(candidate_texts))
+        top_indices  = np.argsort(scores)[::-1][:top_k_actual]
+
+        return [
+            {
+                "text":  candidate_texts[i],
+                "score": float(round(float(scores[i]), 4)),
+                "rank":  rank + 1,
+            }
+            for rank, i in enumerate(top_indices)
+        ]
 
     @property
     def backend(self) -> str:

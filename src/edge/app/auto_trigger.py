@@ -132,8 +132,10 @@ class AutoTrigger:
                         f"AutoTrigger queued: {event.voxel_count} RED voxels "
                         f"at {event.region_center.round(2)}"
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Queue filled between the not-full() check and put — drop this
+                    # trigger (the next scan will re-raise it) but record why.
+                    logger.debug(f"AutoTrigger enqueue skipped (queue race): {e}")
 
     def notify_goal_reached(self, goal_position: np.ndarray) -> None:
         """Called when Nav2 reaches a navigation goal."""

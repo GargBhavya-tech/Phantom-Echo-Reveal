@@ -326,6 +326,61 @@ def generate_gaussians_for_region(
                         f"in {time.time()-t0:.2f}s")
             return tier2_result, "diffusion"
 
+    # Tier 2b: REAL generative 3D model — Shap-E text→3D (public weights,
+    # single consumer GPU). Enabled by `export PHANTOM_GEN_BACKEND=shap_e`.
+    # This is genuine generative AI (not template instancing): it synthesises a
+    # 3D object for the region's semantic label, samples it to splats, clamps to
+    # the occlusion bbox. Falls back to Tier 3 on any error.
+    if not simulate and os.environ.get("PHANTOM_GEN_BACKEND", "").lower() == "shap_e":
+        shap_result = _try_shap_e_3d(semantic, bbox_min, bbox_max, floor_y, seed)
+        if shap_result is not None:
+            shap_result = clamp_geometry_to_bounds(shap_result, bbox_min, bbox_max)
+            logger.info(f"Tier 2b (Shap-E REAL generative 3D): {len(shap_result)} "
+                        f"splats for '{semantic}' in {time.time()-t0:.2f}s")
+            return shap_result, "shap_e"
+
+    # SECTION 5.1 — FAISS retrieval (before Tier-3 template fallback):
+    # For structural semantics (WALL) and known furniture, first try to retrieve
+    # the best-matching geometry from the in-memory FAISS index. This gives a
+    # more accurate shape than the generic physics-consistent template and uses
+    # the real FAISS+MobileCLIP pipeline instead of hard-coded shape lookup.
+    # Only used when PHANTOM_GEN_BACKEND != shap_e (Shap-E is richer).
+    sem_upper = semantic.upper()
+    _FAISS_SEMANTICS = {"WALL", "CHAIR", "TABLE", "DESK", "SOFA",
+                        "SHELF", "DOOR", "CABINET", "PLANT", "MONITOR"}
+    if sem_upper in _FAISS_SEMANTICS:
+        try:
+            from src.edge.retrieval.faiss_floorplan import get_retriever
+            faiss_retriever = get_retriever()
+            faiss_query = (
+                f"{sem_upper.lower()} "
+                f"width={bbox_max[0]-bbox_min[0]:.1f}m "
+                f"height={bbox_max[1]-bbox_min[1]:.1f}m "
+                f"depth={bbox_max[2]-bbox_min[2]:.1f}m "
+                "vertical flat rectangular"
+            )
+            faiss_result = faiss_retriever.retrieve(
+                query=faiss_query,
+                bbox_min=bbox_min, bbox_max=bbox_max,
+                floor_y=floor_y, ceiling_y=ceiling_y,
+                max_gaussians=min(200, int(_SEMANTIC_CONFIGS.get(
+                    sem_upper, _SEMANTIC_CONFIGS["DEFAULT"])["n_splats"])),
+                seed=seed,
+            )
+            if faiss_result:
+                faiss_result = clamp_geometry_to_bounds(faiss_result, bbox_min, bbox_max)
+                # SlotLSTM filter for furniture semantics
+                faiss_result = _apply_slotlstm_filter(
+                    faiss_result, semantic, floor_y, ceiling_y,
+                    bbox_min, bbox_max)
+                logger.info(
+                    f"FAISS retrieval: {len(faiss_result)} Gaussians for '{semantic}' "
+                    f"in {time.time()-t0:.3f}s"
+                )
+                return faiss_result, "faiss_retrieval"
+        except Exception as _fe:
+            logger.debug(f"FAISS retrieval skipped ({_fe}) — falling through to Tier 3")
+
     # Tier 3: synthetic
     gaussians = _generate_synthetic_gaussians(semantic, bbox_min, bbox_max, floor_y, ceiling_y, seed)
     gaussians = clamp_geometry_to_bounds(gaussians, bbox_min, bbox_max)
@@ -333,8 +388,121 @@ def generate_gaussians_for_region(
     if not validate_geometry_bounds(gaussians, bbox_min, bbox_max):
         logger.warning(f"Post-clamp validation failed for {semantic}")
 
-    logger.info(f"Tier 3 (synthetic) generation: {len(gaussians)} splats in {time.time()-t0:.3f}s")
-    return gaussians, "synthetic"
+    # SlotLSTM structural filter on Tier-3 output
+    gaussians = _apply_slotlstm_filter(gaussians, semantic, floor_y, ceiling_y, bbox_min, bbox_max)
+
+    logger.info(f"Tier 3 (TEMPLATE instancing — not generative AI): "
+                f"{len(gaussians)} splats from a hardcoded '{semantic}' furniture "
+                f"template in {time.time()-t0:.3f}s. Set VIDEOSCENE_API_URL (Tier 1) "
+                f"or a GPU+diffusers (Tier 2) for real generation.")
+    return gaussians, "template"
+
+
+def _apply_slotlstm_filter(gaussians: List[Dict[str, Any]],
+                            semantic: str,
+                            floor_y: float,
+                            ceiling_y: float,
+                            bbox_min: np.ndarray,
+                            bbox_max: np.ndarray) -> List[Dict[str, Any]]:
+    """Apply SlotLSTM structural constraint filter (Section 5.1 — Missing Component 2).
+
+    Filters generated Gaussians through physics-law + structural constraint
+    validation. Silently returns the original list if the filter module is
+    unavailable (fail-open design).
+    """
+    from src.edge.phantom_lite.affordance_router import SLOTLSTM_SEMANTICS, SLOTLSTM_CONSTRAINTS
+    if semantic.upper() not in SLOTLSTM_SEMANTICS:
+        return gaussians   # no structural constraints for this semantic
+    try:
+        from src.edge.retrieval.slot_lstm_filter import SlotLSTMStructuralFilter
+        filt = SlotLSTMStructuralFilter()
+        constraints = SLOTLSTM_CONSTRAINTS.get(semantic.upper(), {})
+        filtered, report = filt.apply(
+            gaussians=gaussians,
+            semantic=semantic,
+            constraints=constraints,
+            floor_y=floor_y,
+            ceiling_y=ceiling_y,
+            bbox_min=bbox_min,
+            bbox_max=bbox_max,
+        )
+        if report.get("removed", 0) > 0:
+            logger.info(
+                f"SlotLSTM filter: '{semantic}' removed {report['removed']} "
+                f"structurally invalid Gaussians "
+                f"({report.get('removal_rate', 0)*100:.0f}% of {report.get('n_in',0)})"
+            )
+        return filtered
+    except Exception as _e:
+        logger.debug(f"SlotLSTM filter skipped ({_e}) — returning unfiltered")
+        return gaussians
+
+
+
+def _try_shap_e_3d(semantic: str,
+                   bbox_min: np.ndarray,
+                   bbox_max: np.ndarray,
+                   floor_y: float,
+                   seed: int = 0):
+    """
+    REAL generative 3D via Shap-E (diffusers). Text → 3D mesh → GREEN splats.
+    Returns None on any failure (no GPU, no weights, import error) so the caller
+    falls back to the template tier. Requires: `pip install diffusers trimesh`.
+    """
+    try:
+        import torch
+        from diffusers import ShapEPipeline
+        from diffusers.utils import export_to_ply
+        import trimesh, tempfile, os as _os
+
+        device = "cuda" if torch.cuda.is_available() else ("mps" if getattr(
+            torch.backends, "mps", None) and torch.backends.mps.is_available() else None)
+        if device is None:
+            return None    # CPU Shap-E is far too slow for a live demo
+
+        model_id = _os.environ.get("PHANTOM_SHAPE_MODEL", "openai/shap-e")
+        pipe = ShapEPipeline.from_pretrained(model_id, torch_dtype=torch.float16).to(device)
+        prompt = {"CHAIR": "a chair", "TABLE": "a small table", "SOFA": "a sofa",
+                  "BOOKSHELF": "a bookshelf", "LAMP": "a desk lamp"}.get(
+                      semantic, f"a {semantic.lower()}")
+        gen = torch.Generator(device=device).manual_seed(int(seed))
+        images = pipe(prompt, guidance_scale=15.0, num_inference_steps=32,
+                      frame_size=256, output_type="mesh", generator=gen).images
+
+        # export the first mesh and load with trimesh to sample points
+        with tempfile.NamedTemporaryFile(suffix=".ply", delete=False) as f:
+            ply_path = f.name
+        export_to_ply(images[0], ply_path)
+        mesh = trimesh.load(ply_path)
+        _os.unlink(ply_path)
+
+        pts, _ = trimesh.sample.sample_surface(mesh, 800)
+        pts = np.asarray(pts, dtype=np.float64)
+
+        # normalise Shap-E's unit-ish output into the occlusion bbox, on the floor
+        pmin, pmax = pts.min(0), pts.max(0)
+        span = np.maximum(pmax - pmin, 1e-6)
+        bspan = (np.asarray(bbox_max) - np.asarray(bbox_min))
+        scale = float(np.min(bspan / span)) * 0.9
+        centred = (pts - (pmin + pmax) / 2.0) * scale
+        centre = (np.asarray(bbox_min) + np.asarray(bbox_max)) / 2.0
+        centred += centre
+        # drop to floor
+        centred[:, 1] += (floor_y - centred[:, 1].min())
+
+        out = []
+        for p in centred:
+            out.append({
+                "position": [float(p[0]), float(p[1]), float(p[2])],
+                "normal": [0.0, 1.0, 0.0], "color": [0.30, 0.80, 0.45],
+                "scale": 0.03, "opacity": 0.85, "confidence": 0.78,
+                "tag": "GREEN", "semantic": semantic,
+            })
+        return out
+    except Exception as e:
+        logger.info(f"Shap-E generation unavailable ({type(e).__name__}) — "
+                    f"falling back to template tier.")
+        return None
 
 
 def _try_tier2_diffusion(semantic: str,

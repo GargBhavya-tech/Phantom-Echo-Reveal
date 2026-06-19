@@ -28,6 +28,23 @@ class PhysicsVerdict(Enum):
     IMPOSSIBLE = "IMPOSSIBLE"
 
 
+# BUG-6 FIX: semantics that are mounted on walls (supported by the wall, not the
+# floor). law_gravity exempts these from the floor-support requirement so they
+# are not flagged IMPOSSIBLE → RED → never generated.
+WALL_MOUNTED_SEMANTICS = frozenset({
+    "CLOCK", "WHITEBOARD", "PAINTING", "PICTURE", "FRAME", "MIRROR",
+    "TV", "MONITOR", "SCREEN", "POSTER", "SHELF_WALL", "SCONCE", "VENT",
+})
+
+# BUG-B FIX: ceiling-hung objects are suspended from the CEILING, not floating.
+# Without this they returned IMPOSSIBLE → RED → a permanent void at the ceiling
+# in any scene with a chandelier or fan.
+CEILING_HUNG_SEMANTICS = frozenset({
+    "CHANDELIER", "FAN", "CEILING_FAN", "PENDANT_LIGHT", "PENDANT",
+    "SPRINKLER", "SMOKE_DETECTOR", "HANGING_LIGHT",
+})
+
+
 @dataclass
 class BoundingBox:
     min_pt: np.ndarray
@@ -86,6 +103,25 @@ def law_gravity(hypothesis: Hypothesis, floor_y: float,
             f"Structural element ({hypothesis.semantic}) — exempt from gravity law"
         )
 
+    # BUG-6 FIX: wall-mounted objects are supported by the WALL, not the floor.
+    # A clock at y=1.5m, a whiteboard at y=1.2m, a monitor at y=1.3m are NOT
+    # "floating" — they are mounted. Without this exemption they returned
+    # IMPOSSIBLE → tagged RED → never generated.
+    if hypothesis.semantic in WALL_MOUNTED_SEMANTICS:
+        return LawResult(
+            "L1_GRAVITY", PhysicsVerdict.POSSIBLE, 0.90,
+            f"Wall-mounted element ({hypothesis.semantic}) — supported by wall, "
+            f"exempt from floor-gravity law"
+        )
+
+    # BUG-B FIX: ceiling-hung objects are suspended from the ceiling.
+    if hypothesis.semantic in CEILING_HUNG_SEMANTICS:
+        return LawResult(
+            "L1_GRAVITY", PhysicsVerdict.POSSIBLE, 0.90,
+            f"Ceiling-hung element ({hypothesis.semantic}) — suspended from "
+            f"ceiling, exempt from floor-gravity law"
+        )
+
     hyp_bottom = float(hypothesis.geometry.min_pt[1])
 
     if hyp_bottom < floor_y - 0.05:
@@ -120,10 +156,18 @@ def law_gravity(hypothesis: Hypothesis, floor_y: float,
 
 def law_occlusion_geometry(hypothesis: Hypothesis, visible_gap_width_m: float,
                             camera_pos: np.ndarray) -> LawResult:
-    hyp_center = hypothesis.geometry.center()
-    dist = np.linalg.norm(hyp_center - camera_pos)
-    if dist < 0.1:
-        return LawResult("L2_OCCLUSION", PhysicsVerdict.POSSIBLE, 0.5, "Too close")
+    # BUG-L2 FIX: L2 is for inferring whether a FULL OCCLUDED OBJECT can fit
+    # through a visible gap in the sensor FOV. It is NOT meaningful for:
+    #   1. Individual sensor Gaussians (2-4cm splats) — every single Gaussian
+    #      is "too narrow" for any reasonable gap, making 100% of the scene RED.
+    #   2. Structural elements (FLOOR/WALL/CEILING) — these are not "objects behind
+    #      a gap", they are room structure that spans the entire room.
+    # The distinguishing heuristic: a hypothesis bbox with min_extent < 10cm
+    # is almost certainly a single Gaussian point, not a full occluded object.
+    # For those, skip L2 and return POSSIBLE.
+    if hypothesis.semantic in ("WALL", "FLOOR", "CEILING"):
+        return LawResult("L2_OCCLUSION", PhysicsVerdict.POSSIBLE, 0.9,
+                         f"Structural element ({hypothesis.semantic}) — exempt from occlusion gap check")
 
     hyp_extent = np.array([
         hypothesis.geometry.max_pt[0] - hypothesis.geometry.min_pt[0],
@@ -131,9 +175,30 @@ def law_occlusion_geometry(hypothesis: Hypothesis, visible_gap_width_m: float,
     ])
     min_extent = float(np.min(hyp_extent))
 
-    if min_extent < visible_gap_width_m * 0.1:
+    # BUG-L2-ORDER FIX: the "object too narrow for the gap" check must run
+    # BEFORE the point-Gaussian early-return. Previously the < 10cm guard
+    # (added to stop every 2-4cm sensor splat being marked IMPOSSIBLE) ran
+    # first and shadowed the narrow-object rule entirely, so a genuinely
+    # impossible sub-gap object (e.g. a 1cm sliver claimed behind a 50cm gap)
+    # was silently returned POSSIBLE. We now distinguish the two cases by the
+    # OBJECT's relationship to the gap, not by an absolute size threshold:
+    #   - an object whose min extent is < 10% of the visible gap genuinely
+    #     cannot have produced that occlusion → IMPOSSIBLE (real L2 inference)
+    #   - a small splat with NO meaningful gap context (gap <= 0) is just a
+    #     sensor point → POSSIBLE / N/A.
+    if visible_gap_width_m > 0.0 and min_extent < visible_gap_width_m * 0.1:
         return LawResult("L2_OCCLUSION", PhysicsVerdict.IMPOSSIBLE, 0.80,
                          f"Object too narrow ({min_extent:.2f}m) for gap ({visible_gap_width_m:.2f}m)")
+
+    # Skip for individual point Gaussians (< 10cm extent) when no gap rules it out.
+    if min_extent < 0.10:
+        return LawResult("L2_OCCLUSION", PhysicsVerdict.POSSIBLE, 0.6,
+                         f"Single-point Gaussian ({min_extent*100:.0f}cm) — L2 N/A")
+
+    hyp_center = hypothesis.geometry.center()
+    dist = np.linalg.norm(hyp_center - camera_pos)
+    if dist < 0.1:
+        return LawResult("L2_OCCLUSION", PhysicsVerdict.POSSIBLE, 0.5, "Too close")
 
     return LawResult("L2_OCCLUSION", PhysicsVerdict.POSSIBLE, 0.85,
                      "Occlusion geometry satisfied")
@@ -173,6 +238,15 @@ def law_light_propagation(hypothesis: Hypothesis, lit_surface_point: np.ndarray,
     if ray_len < 1e-6:
         return LawResult("L4_LIGHT", PhysicsVerdict.POSSIBLE, 0.5, "Degenerate ray")
     ray_dir_n = ray_dir / ray_len
+
+    # BUG-L4 FIX: if lit_surface_point is the hypothesis's own position (or very
+    # close to it), the hypothesis IS the lit surface — it cannot occlude itself.
+    # Previously this caused every Gaussian to be IMPOSSIBLE when evaluate() passed
+    # its own position as lit_surface_point (engine.py line: "lit_surface_point": pos).
+    hyp_center = hypothesis.geometry.center()
+    if np.linalg.norm(hyp_center - lit_surface_point) < 0.05:
+        return LawResult("L4_LIGHT", PhysicsVerdict.POSSIBLE, 0.85,
+                         "Hypothesis IS the lit surface — no self-occlusion")
 
     t_min, t_max = _ray_aabb_intersect(light_source, ray_dir_n, hypothesis.geometry)
     if t_min is not None and 0 < t_min < ray_len:
@@ -215,9 +289,16 @@ def law_acoustic_mirror(hypothesis: Hypothesis, acoustic_distance_m: float,
                       hypothesis.geometry.max_pt)
     nearest_dist = float(np.linalg.norm(clamped - phone_position))
 
-    # Use nearest-surface distance for the comparison
+    # Use nearest-surface distance as the primary prediction (BUG-CE5), but a
+    # real sonar return can plausibly correspond to either the nearest face or
+    # the body of a small target. For point-like hypotheses the two distances
+    # nearly coincide; for large surfaces only the nearest face is physical.
+    # BUG-L5-CONVENTION FIX: accept the smaller of the two errors so a caller
+    # that supplies a centre-referenced range (the natural convention for a
+    # triangulated point) is not spuriously rejected when the bbox is tiny.
     predicted_dist = nearest_dist
-    error = abs(predicted_dist - acoustic_distance_m)
+    error = min(abs(nearest_dist - acoustic_distance_m),
+                abs(center_dist  - acoustic_distance_m))
 
     if error < tolerance_m:
         conf = min(0.99, 0.95 + (tolerance_m - error) / tolerance_m * 0.04)
@@ -274,6 +355,14 @@ def law_support(hypothesis: Hypothesis, scene_objects: List[SceneObject],
     if hypothesis.semantic in ("WALL", "FLOOR", "CEILING"):
         return LawResult("L7_SUPPORT", PhysicsVerdict.POSSIBLE, 0.9,
                          "Structural element")
+
+    # BUG-7 FIX (analysis report): wall-mounted and ceiling-hung objects have
+    # their own structural support (wall bracket, ceiling mount) which L7 cannot
+    # detect from geometry alone. Exempting them prevents false IMPOSSIBLE on
+    # clocks, monitors, chandeliers etc. that are perfectly valid at mid-air y.
+    if hypothesis.semantic in WALL_MOUNTED_SEMANTICS | CEILING_HUNG_SEMANTICS:
+        return LawResult("L7_SUPPORT", PhysicsVerdict.POSSIBLE, 0.85,
+                         f"Wall/ceiling-mounted ({hypothesis.semantic}) — support exempt")
 
     hyp_bottom = float(hypothesis.geometry.min_pt[1])
 
@@ -379,6 +468,32 @@ def run_contradiction_engine(hypothesis: Hypothesis,
 
     # Aggregate
     impossible = [r for r in results if r.verdict == PhysicsVerdict.IMPOSSIBLE]
+
+    # BUG-7 FIX (analysis report / test_physics_laws.py failures):
+    # L5 acoustic PROVEN (sonar physically measured the surface) overrides L7
+    # support IMPOSSIBLE (geometric inference that "nothing holds it up").
+    # Acoustic direct evidence is stronger than geometric structural inference —
+    # if the bat-sonar says "there is a surface at distance d", the surface IS
+    # there regardless of whether we can see its support structure. Without this
+    # fix, acoustically-confirmed occluded objects at mid-height (like the sofa
+    # interior at y=0.4m) were returned as RED because L7 fired before L5 could
+    # promote them. The acoustic tag (TEAL) was never reachable.
+    acoustic_proven = any(r.law_id == "L5_ACOUSTIC" and
+                          r.verdict == PhysicsVerdict.PROVEN
+                          for r in results)
+    if acoustic_proven:
+        # BUG-L5-OVERRIDE FIX: a PROVEN acoustic return is DIRECT measurement of
+        # a surface. It must override the geometric-INFERENCE laws that only
+        # argue a surface "shouldn't" be there:
+        #   L7_SUPPORT  — "nothing visible holds it up"
+        #   L1_GRAVITY  — "it floats" (same inference, support not yet sensed)
+        #   L2_OCCLUSION— "too narrow to have caused the gap" (a triangulated
+        #                 acoustic POINT is a measurement, not a claimed object)
+        # We do NOT override L6_PENETRATION (a sonar point inside a known solid
+        # wall is a genuine contradiction worth flagging).
+        _overridable = {"L7_SUPPORT", "L1_GRAVITY", "L2_OCCLUSION"}
+        impossible = [r for r in impossible if r.law_id not in _overridable]
+
     if impossible:
         return ContradictionResult(
             hypothesis=hypothesis,
@@ -407,7 +522,12 @@ def run_contradiction_engine(hypothesis: Hypothesis,
         hypothesis=hypothesis,
         final_verdict=PhysicsVerdict.POSSIBLE,
         final_confidence=avg_conf,
-        final_tag="GREEN",
+        # BUG-2 FIX: a hypothesis that passes all laws WITHOUT a PROVEN result is
+        # "physically probable" → YELLOW, not GREEN. GREEN is reserved for
+        # VideoScene-generated geometry only; tagging undetermined-but-possible
+        # geometry GREEN misrepresented it as AI-generated in the viewer before
+        # generation had even run.
+        final_tag="YELLOW",
         law_results=results,
         reason="All laws satisfied — awaiting generation")
 
@@ -554,9 +674,14 @@ class ContradictionEngineFixed:
 
         input_tag = str(ctx.get("input_tag", "")).upper()
 
-        # BLUE = already physics-proven. Skip re-verification (correctness + speed).
+        # v23 honesty fix (report finding 4): BLUE is a HIGH-CONFIDENCE PRIOR
+        # (sensor-observed geometry that the physics priors are consistent with),
+        # NOT a mathematical proof. The earlier "PROVEN" label overstated it —
+        # most BLUE is "ARKit confidence=2 + a Manhattan/gravity prior", which is
+        # usually-right, not certain. We skip per-splat re-verification for speed
+        # but no longer claim proof.
         if input_tag == "BLUE":
-            return "BLUE", "PROVEN", float(hyp.confidence)
+            return "BLUE", "HIGH_CONF_PRIOR", float(hyp.confidence)
 
         # Run physics for all other tags
         result = run_contradiction_engine(h, scene_ctx)

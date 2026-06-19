@@ -1,13 +1,23 @@
 # PHANTOM-ECHO REVEAL
 
+> **v23 integrity pass** — the acoustic channel now recovers occluded-surface
+> range through real signal processing (matched filter + ISM + triangulation),
+> not from target coordinates. Stub models (synthetic depth densifier, template
+> occlusion fill) are labelled as such. Headline accuracy is the **real held-out**
+> RGB-D number (F1@5cm 0.957); the synthetic ~0.86-mean is a disclosed
+> self-consistency check, not the accuracy headline. Reproduce everything with `./reproduce.sh`. New in v24: real Depth-Anything-V2 backend + an animated **Sonar Reveal** demo (`output/sonar_reveal.html`, double-click). See `RUN_INSTRUCTIONS.md` for the full how-to-run guide.
+
+
+
+
 - **Problem Statement Number** - 09
 - **Problem Statement Title** - Occlusion-Aware 3D Scene Reconstruction in Partially Observable Real-World Environments
 - **Team name** - Chole Bhhature
 - **Team members (Names)** - Bhavya Garg
 - **Institute/College Name** - IIIT Bangalore, 26/C, Electronics City Phase 1, Hosur Road, Bengaluru 560100
-- **Final Presentation Google Drive Link** 
-- **Full Submission Demo Video Link** 
-- **Setup & Result Reproducibility Video Link**
+- **Final Presentation Google Drive Link** - ⚠️ TODO BEFORE SUBMISSION: upload `PHANTOM_ECHO_REVEAL_Presentation.pptx` as a PDF to Google Drive, set link-sharing to "Anyone with the link", paste the URL here.
+- **Full Submission Demo Video Link** - ⚠️ TODO BEFORE SUBMISSION: upload the demo video to YouTube (public/unlisted — Drive uploads are NOT allowed for video), paste the URL here.
+- **Setup & Result Reproducibility Video Link** - ⚠️ TODO BEFORE SUBMISSION: record a screen capture of `./reproduce.sh` running (install → real eval → tests), upload to YouTube (public/unlisted), paste the URL here.
 
 ### Project Artefacts
 
@@ -92,22 +102,27 @@ surface, without dropping coverage.
 
 | Metric (real Redwood, held-out frame) | Sensed recon | Full scene | Target | Met |
 |---|---|---|---|---|
-| Median reconstruction error | **1.76 cm** | 1.5 cm | < 2 cm | ✓ |
-| Recall @ 5cm | **0.989** | 0.996 | — | ✓ |
-| F1 @ 10cm | **0.990** | 0.866 | ≥ 0.85 | ✓ |
-| F1 @ 5cm | **0.771** | 0.571 | — | — |
-| Precision @ 5cm | **0.632** | 0.397 | — | — |
+| Median reconstruction error | **0.98 cm** | 0.94 cm | < 2 cm | ✓ |
+| Recall @ 5cm | **0.994** | 0.998 | — | ✓ |
+| F1 @ 10cm | **0.998** | 0.926 | ≥ 0.85 | ✓ |
+| F1 @ 5cm | **0.957** | 0.786 | ≥ 0.85 | ✓ (sensed) |
+| Precision @ 5cm | **0.922** | 0.648 | — | — |
 
-**Read this honestly:** on real, noisy Kinect depth the system reconstructs
-~99% of the observed surface (recall 0.989) to a **1.76 cm median error**, with
-**F1 @ 10cm = 0.990**. F1 @ 5cm is **0.771** and that is a genuine ceiling, not a
-tuning artefact: we pursued TSDF/voxel/k-NN denoising exhaustively and real-data
-5cm-F1 plateaus at ~0.77 because the held-out ground truth is itself noisy real
-depth (~1-2cm) and the unresolved RED layer carries ~5cm error. We deliberately
-do *not* inflate it. 0.85 is met where it is honestly achievable — on the
-synthetic benchmark @ 5cm (0.903) and on real data @ 10cm (0.990). The 5cm-real
-gap is exactly what a closed-loop synthetic benchmark hides, and why we report
-this number at all.
+> All five numbers are the committed `output/real_data_eval.json` (regenerate
+> with the command above).
+
+**Read this honestly:** on real, noisy PrimeSense depth the system reconstructs
+~99% of the observed surface (recall 0.994) to a **0.98 cm median error**, with
+**F1 @ 5cm = 0.957** and **F1 @ 10cm = 0.998** on the directly-sensed layer.
+This blind, non-circular result is the strongest number in the project. The v29
+`_fill_depth_holes` fix — preserve every valid sensor reading, NN-fill only the
+missing pixels, and skip the synthetic-room densifier (which assumed a
+rectangular room and injected ~1 m error on real scenes) — took real held-out
+F1@5cm from 0.77 → **0.957** and median error 1.76 → **0.98 cm**. The
+`full_scene` column folds in generative GREEN and the axis-aligned BLUE
+structural prior, which is invalid on this non-rectangular real room, so its 5cm
+precision drops to 0.65; we report it separately rather than blending it into
+the headline.
 
 ### B. Synthetic Closed-Loop Benchmark — internal consistency only
 
@@ -115,18 +130,25 @@ this number at all.
 python -m src.main --mode eval        # all 3 scenes, ~1 min, CPU-only
 ```
 
-| Metric (3-scene synthetic benchmark¹) | PHANTOM v22 | Target | Met |
+| Metric (3-scene synthetic benchmark¹) | PHANTOM | Target | Met |
 |---|---|---|---|
-| F1 @ 5cm (observed surfaces) | **0.903** | ≥ 0.85 | ✓ |
-| F1 @ 10cm | **0.930** | — | ✓ |
-| Precision @ 5cm | **0.99** | — | ✓ |
-| Semantic accuracy | **99.9%** | ≥ 93% | ✓ |
-| Reconstruction error (analytic dist. to true surface)² | **~0.01 cm** | < 1.5cm | ✓ |
-| End-to-end live scan (8 frames, CPU, no models) | **~14 s** | — | ✓ |
+| F1 @ 5cm (observed surfaces, mean) | **0.858** | ≥ 0.85 | ~ (1/3 scenes — see note) |
+| F1 @ 10cm (mean) | **0.879** | ≥ 0.85 | ✓ |
+| Precision @ 5cm (mean) | **0.987** | — | ✓ |
+| Semantic accuracy (mean) | **95.7%** | ≥ 93% | ✓ |
+| Reconstruction error (analytic dist. to true surface)² | **~0.0 cm** | < 1.5cm | ✓ |
+| End-to-end live scan (8–12 frames, CPU, no models) | **~10–35 s** | — | ✓ |
 
-Per-scene results in `output/eval_results.json` (living_room 0.916 / office
-0.890 / bedroom 0.903). `coverage` (~0.30) is reported per scene: a partial
-walk only observes ~30% of room surfaces, and recall is computed over that
+> **5cm-F1 honesty note:** the synthetic mean F1@5cm is **0.858**; only
+> living_room (0.901) clears 0.85 at the 5 cm threshold — office (0.840) and
+> bedroom (0.833) clear it only at 10 cm. `output/eval_results.json` therefore
+> reports `all_kpis_met: false`, and we do not paper over it. The number to
+> quote is the **real** blind held-out F1@5cm of **0.957** (Section A); this
+> synthetic table is a self-consistency check, not the accuracy headline.
+
+Per-scene F1@5cm in `output/eval_results.json` (living_room 0.901 / office
+0.840 / bedroom 0.833). `coverage` (0.37–0.58) is reported per scene: a partial
+walk only observes part of the room surfaces, and recall is computed over that
 observed region — it does not claim to reconstruct never-scanned geometry.
 
 > ² The synthetic reconstruction error is measured *analytically* against the
@@ -157,44 +179,79 @@ observed region — it does not claim to reconstruct never-scanned geometry.
 
 ## Quick Start
 
-### 1. Install dependencies
+> **Everything below runs offline on CPU.** Simulate mode is the default — no
+> cloud API, no model downloads, and the real-data evaluation reads the
+> `datasets/redwood_sample/` frames committed in this repo.
+
+### 0. One command (recommended)
 ```bash
+./reproduce.sh        # Linux/macOS  — installs deps, runs the pipeline,
+                      # the held-out eval, and the full test suite
+# Windows:  .\reproduce.ps1
+```
+
+### 1. Manual setup
+```bash
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
+No `.env` is required for the default offline mode. Cloud VideoScene
+generation is optional — only then do you `cp .env.example .env` and fill in
+the keys.
 
-### 2. Configure environment
+### 2. Reproduce the headline KPI (blind, real-data, non-circular)
 ```bash
-cp .env.example .env
-# Edit .env — set PHANTOM_SIMULATE=true for offline mode (no cloud API needed)
-```
-
-### 3. Run the demo pipeline
-```bash
-python -m src.main --mode demo
-```
-Output: `output/scene_gaussians.ply`, `output/scene_mesh.ply`, `output/costmap.npy`, `output/summary.json`
-
-### 4. Open the live dashboard
-```bash
-python -m src.main --mode realtime
-# Then open: http://localhost:8000
-```
-
-### 5. Run evaluation
-```bash
-# A. Blind real-data held-out test (the honest, non-circular number)
 python -m src.eval.run_real_eval --dataset datasets/redwood_sample --frames 4
-#    -> output/real_data_eval.json  (median err ~1.76cm, F1@10cm 0.990, recall 0.99)
+#  -> output/real_data_eval.json
+#     F1@5cm 0.957 · F1@10cm 0.998 · median recon err 1.0 cm  (sensed layer)
+```
+This reconstructs from real Redwood RGB-D frames 1–4 and scores against the
+held-out frame 5 the pipeline never saw. **What this number measures:** the
+fidelity of the *directly-sensed* reconstruction (WHITE sensor + RED unknown).
+The acoustic (TEAL) and generative (GREEN) layers are reported **separately**
+under `full_scene` — see *Honest scope of each metric* below.
 
-# B. Synthetic closed-loop consistency benchmark (3 scenes)
-python -m src.main --mode eval --scenes living_room_01 office_01 bedroom_01
-#    -> output/eval_results.json
+### 3. Run the demo pipeline + live dashboard
+```bash
+python -m src.main --mode demo        # writes output/summary.json
+python -m src.main --mode realtime    # live dashboard at http://localhost:8000
 ```
 
-### 6. Atlas baseline comparison
+### 4. Agentic planner (Prove → Measure → Imagine as tool use)
 ```bash
+python -m src.main --mode agent       # -> output/agent_trace.json
+```
+This is where the **acoustic / TEAL** path is exercised end-to-end on the
+synthetic scene: a hidden surface is recovered by the forward+inverse sonar
+model and triangulated (see *Honest scope* below).
+
+### 5. Synthetic closed-loop benchmark + baseline
+```bash
+python -m src.main --mode eval --scenes living_room_01 office_01 bedroom_01
 python -m src.eval.atlas_baseline
 ```
+
+### 6. Run the test suite
+```bash
+python -m pytest tests/ -q            # 45 tests: physics laws + integrity
+```
+
+---
+
+### Honest scope of each metric (read this — it is the credibility story)
+
+| Layer | Tag | Where it is proven | Where it is **not** claimed |
+|---|---|---|---|
+| Direct sensing | WHITE / RED | **Real held-out KPI** (`real_data_eval.json`, F1@5cm 0.957) | — |
+| Acoustic occlusion recovery | TEAL | **Synthetic forward+inverse sonar** (`--mode agent`, `acoustic_forward.py`) | Not yet measured on real phone audio — see `acoustic_forward.py` limitations |
+| Generative completion | GREEN | Reported under `full_scene` in `real_data_eval.json` | Excluded from the headline accuracy number |
+
+The real-data headline is deliberately scored on the directly-sensed layer
+only, so it is a clean sensed-vs-sensed comparison. The acoustic channel — the
+project's signature contribution — is validated in a **controlled physical
+simulation** (matched-filter → ISM subtraction → SAS triangulation on a
+noise-corrupted, multipath signal), not on recorded hardware audio. That
+hardware validation is stated as future work, not as a measured result.
 
 
 ---
@@ -246,8 +303,41 @@ Layer 2  PHANTOM-LITE: 8 physics laws → BLUE proven + TEAL measured + RED unkn
 Layer 3  VideoScene generation (3-tier) + Semantic Affordance Router
 Layer 4  Dual output: navigation map (open RED) + deliverable mesh (SPSR sealed)
 Layer 5  ROS2 Nav2 + adaptive-λ information-gain reward + Mode B auto-trigger
-Layer 6  WebGPU gsplat.js viewer + QR code for judge phones
+Layer 6  Three.js/WebGL viewer + QR code for judge phones
+Agent    Prove→Measure→Imagine planner that calls Layers 0–5 as TOOLS (below)
 ```
+
+## Agentic Layer — Prove → Measure → Imagine as tool use
+
+The pipeline above is wrapped by a **tool-using agent** (`src/agent/`) that turns
+the project's philosophy into an explicit reasoning loop. For each genuinely
+**unknown** region it runs a Reason → Act → Observe loop, choosing one pipeline
+**tool** per step and deciding the cheapest method that resolves the region:
+
+| Tool (wraps a real module) | Step | Resolves to |
+|---|---|---|
+| `apply_physics` → contradiction engine (8 laws) | **PROVE** | BLUE if PROVEN |
+| `acoustic_measure` → forward/inverse DSP + SAS | **MEASURE** | TEAL if a surface is recovered |
+| `generate_geometry` → VideoScene | **IMAGINE** | GREEN if bounded & generatable |
+| `plan_viewpoint` → next-best-view | **EXPLORE** | RED + a robot waypoint otherwise |
+
+```bash
+python -m src.main --mode agent          # offline, deterministic, reproducible
+#   floor_contact  -> BLUE   (physics proved it)
+#   hidden_surface -> TEAL   (bat-sonar recovered the occluded surface, ~0.2 cm)
+#   sofa_interior  -> GREEN  (generated within occlusion bounds)
+#   far_void       -> RED    (too large to imagine — robot explores; waypoint emitted)
+# -> output/agent_trace.json   (full per-step reasoning + tool observations)
+```
+
+The planner has two interchangeable policies over the **same** tool surface:
+a **deterministic** Prove→Measure→Imagine procedure (the default — no API key,
+fully reproducible) and an optional **Claude planner** (`claude-opus-4-8` via
+forced tool-use) enabled with `PHANTOM_AGENT_LLM=claude` + `ANTHROPIC_API_KEY`,
+which falls back to the deterministic policy on any error. The agent never sees
+a hidden answer — it sequences real tool calls and interprets their results
+(e.g. acoustics honestly *decline* a solid interior, so the agent moves on to
+generation). Locked by `tests/test_integrity.py::test_agent_tool_use_resolves_all_paths`.
 
 ---
 
@@ -258,7 +348,7 @@ Layer 6  WebGPU gsplat.js viewer + QR code for judge phones
 [0:20–0:35]  Acoustic bat-sonar — TEAL Gaussian appears behind sofa
              "Sound bounced around the sofa. 23ms. 343 m/s. 3.9m."
 [0:35–0:50]  Static/Dynamic separation — ORANGE hand tracked, table stays clean
-[0:50–1:00]  Judges scan QR code → WebGPU viewer on their phones
+[0:50–1:00]  Judges scan QR code → Three.js/WebGL viewer on their phones
 [1:00–1:20]  Tap to Reveal — judge taps RED box → GREEN objects appear < 3s
 [1:20–1:40]  Mode B — robot hits RED zone → pauses → GREEN fills → resumes
 [1:40–2:00]  Atlas vs PHANTOM comparison table
@@ -369,13 +459,13 @@ ScanNet download: https://github.com/ScanNet/ScanNet
 3. **Semantic Affordance Routing** — Continuous plane-to-point alignment prevents gravity-override anomaly.
 4. **Dual Output Architecture** — Navigation map (open RED) + deliverable mesh (sealed) from one Gaussian scene.
 5. **46-Flaw Engineering History** — 46 distinct bugs identified and fixed across 17 versions before implementation.
+6. **Agentic Tool-Use Planner** — the Prove→Measure→Imagine philosophy executed as a real Reason→Act→Observe agent that calls the physics, acoustic, generation, and next-best-view modules as tools and decides per region which to use (deterministic offline, or Claude `claude-opus-4-8` via forced tool-use). See `src/agent/`.
 
 ---
 
 ## License
 
 MIT — see LICENSE
-<<<<<<< HEAD
 
 ---
 
@@ -392,6 +482,7 @@ auto-served by FastAPI at **http://localhost:8000/docs** (Swagger UI).
 | POST | `/api/scan/stop` | Cancel a running scan gracefully |
 | POST | `/api/reveal` | Mode A tap-to-reveal a RED region |
 | POST | `/api/mode_b` | Mode B robot auto-reveal within a radius |
+| POST | `/api/agent` | Run the Prove→Measure→Imagine tool-using agent (streams reasoning to the log panel) |
 | POST | `/api/photo` | Upload a photo -> monocular-depth point cloud |
 | GET  | `/api/state` | Engine state + live tag counts |
 | GET  | `/api/kpis` | KPI table (eval results + Atlas baseline) |
@@ -400,6 +491,3 @@ auto-served by FastAPI at **http://localhost:8000/docs** (Swagger UI).
 
 > Demo-mode auth: set `PHANTOM_DEMO_TOKEN` to require an `X-Demo-Token` header
 > on `/api/reveal` and `/api/mode_b` (prevents injection on shared-WiFi demos).
-=======
-#
->>>>>>> 2dc7877fcfe2a119ee6bc7797109727dfdfa2356

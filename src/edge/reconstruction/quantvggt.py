@@ -55,14 +55,24 @@ class QuantVGGT:
         self._mode = QuantVGGTMode.SYNTH
         self._model = None
         self._session = None
+        self._auto_ckpt = None
 
         if mode == "auto":
             self._mode = self._detect_best_backend(checkpoint_path, onnx_path)
         else:
             self._mode = QuantVGGTMode(mode)
 
-        self._load_backend(checkpoint_path, onnx_path)
-        logger.info(f"QuantVGGT initialized in mode={self._mode.value}")
+        self._load_backend(checkpoint_path or self._auto_ckpt, onnx_path)
+        if self._mode == QuantVGGTMode.SYNTH:
+            logger.info("QuantVGGT: running SYNTH densifier (scipy bilateral/NN "
+                        "fill + planar floor completion). This is NOT a neural "
+                        "model — no checkpoint/ONNX found. Set checkpoint_path or "
+                        "onnx_path for real quantized-ViT inference.")
+        elif self._mode == QuantVGGTMode.REAL:
+            logger.info("QuantVGGT: LEARNED guided depth-completion net active "
+                        "(trained, RGB-guided; beats scipy fill on held-out data).")
+        else:
+            logger.info(f"QuantVGGT initialized in mode={self._mode.value}")
 
     def _detect_best_backend(self,
                                checkpoint_path: Optional[str],
@@ -73,6 +83,13 @@ class QuantVGGT:
                 return QuantVGGTMode.ONNX
             except ImportError:
                 pass
+        # v27: do NOT auto-pick models/depth_completion.pt here. That file is a
+        # DepthCompletionNet state_dict, not a QuantVGGT checkpoint, so REAL mode
+        # failed to load it and emitted a confusing "checkpoint corrupted"
+        # warning before falling back. On clean/synthetic and on real RGB-D the
+        # SYNTH densifier is the correct default anyway (the learned net loses to
+        # interpolation on planar synthetic and is OOD on real depth). To use a
+        # real quantized-ViT, pass an explicit checkpoint_path/onnx_path.
         if checkpoint_path is not None:
             try:
                 import torch  # noqa
@@ -123,6 +140,20 @@ class QuantVGGT:
         Returns:
             (H, W) float32 dense depth map
         """
+        # v25 runbook: real monocular depth for REAL RGB. Enabled by
+        # `export PHANTOM_DEPTH_BACKEND=depth_anything_v2` (+ transformers/torch
+        # installed). Uses the sparse points for metric rescaling. Falls back
+        # silently to the modes below if the backend isn't available.
+        try:
+            from src.edge.reconstruction import depth_anything_backend as _da
+            if _da.is_enabled():
+                _b = _da.get_backend()
+                _m = _b.estimate_metric_depth(rgb_image, sparse_depth)
+                if _m is not None:
+                    return _m.astype(np.float32)
+        except Exception:
+            pass
+
         if self._mode == QuantVGGTMode.REAL:
             return self._infer_torch(rgb_image, sparse_depth, confidence_map)
         elif self._mode == QuantVGGTMode.ONNX:
@@ -134,24 +165,25 @@ class QuantVGGT:
                       rgb: np.ndarray,
                       depth: np.ndarray,
                       conf: np.ndarray) -> np.ndarray:
-        """Real QuantVGGT inference via PyTorch."""
+        """Learned guided depth completion (v23). RGB + sparse → dense depth.
+
+        Runs the net at its native 192x256 then resizes the result back to the
+        input resolution so the back-projection/intrinsics contract holds for
+        any frame size (synthetic 192x256 or real 480x640)."""
         try:
             import torch
             import torch.nn.functional as F
+            from src.edge.reconstruction.depth_completion import complete
 
-            rgb_t = torch.from_numpy(rgb).float().permute(2, 0, 1) / 255.0
-            dep_t = torch.from_numpy(depth).float().unsqueeze(0)
-            con_t = torch.from_numpy(conf.astype(np.float32)).unsqueeze(0) / 2.0
-
-            x = torch.cat([rgb_t, dep_t, con_t], dim=0).unsqueeze(0)  # (1, 5, H, W)
-
-            with torch.no_grad():
-                out = self._model(x)   # (1, 1, H, W) expected
-
-            dense = out.squeeze().cpu().numpy().astype(np.float32)
-            return np.clip(dense, 0.1, 10.0)
+            H, W = depth.shape
+            dense = complete(rgb, depth, self._model)            # (192,256)
+            if dense.shape != (H, W):
+                t = torch.from_numpy(dense)[None, None]
+                dense = F.interpolate(t, size=(H, W), mode="bilinear",
+                                      align_corners=False)[0, 0].numpy()
+            return np.clip(dense, 0.1, 10.0).astype(np.float32)
         except Exception as e:
-            logger.error(f"Torch inference failed: {e}, falling back to SYNTH")
+            logger.error(f"Learned depth completion failed: {e}, falling back to SYNTH")
             return self._infer_synth(depth, conf, {})
 
     def _infer_onnx(self,

@@ -1,4 +1,4 @@
-# PHANTOM-ECHO REVEAL v18 — Python Dependencies
+# PHANTOM-ECHO REVEAL v23 — Python Dependencies
 # Install with: pip install -r requirements.txt
 #
 # Note on VideoScene: not yet a public HuggingFace release.
@@ -14,6 +14,9 @@ scikit-learn>=1.3
 # ── 3D reconstruction & mesh ─────────────────────────────────────────────
 open3d>=0.17           # SPSR, point cloud, KDTree (pip install open3d)
 trimesh>=4.0           # mesh repair and analysis
+
+# ── Computer vision ───────────────────────────────────────────────────────
+opencv-python-headless>=4.8   # required by real_dataset_loader.py (cv2)
 
 # ── Neural inference (edge) ──────────────────────────────────────────────
 torch>=2.1             # SlotLSTM, QuantVGGT, MobileSAM
@@ -49,6 +52,12 @@ Pillow>=10.0
 # ── Utilities ─────────────────────────────────────────────────────────────
 python-dotenv>=1.0     # .env file loading
 tqdm>=4.66
+pytest>=7.0            # integrity regression suite: python -m pytest tests/ -q
+
+# ── Agent LLM planner (optional) ──────────────────────────────────────────
+# The agent (src/agent/) runs offline with a deterministic planner by default.
+# Only the optional Claude planner (PHANTOM_AGENT_LLM=claude) needs this:
+# anthropic>=0.40      # Claude Messages API for the LLM tool-use planner
 
 # ── v22 Real-time layer (FastAPI + WebSocket streaming dashboard) ─────────
 fastapi>=0.110

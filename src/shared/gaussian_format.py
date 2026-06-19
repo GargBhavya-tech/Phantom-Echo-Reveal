@@ -32,7 +32,10 @@ TAG_LOG_ODDS: Dict[str, float] = {
     TAG_GREEN:  1.5,
     TAG_YELLOW: 1.0,
     TAG_RED:    0.0,
-    TAG_ORANGE: 0.0,
+    TAG_ORANGE: 0.5,   # BUG-3 FIX: was 0.0 — must match occupancy_grid.LOG_ODDS_SENSOR
+                       # ("ORANGE": 0.5). A tracked moving person now contributes
+                       # +0.5 occupancy to any costmap built from the shared table,
+                       # not 0. Decays via LOG_ODDS_ORANGE_DECAY on next frame.
 }
 
 # ── All numeric constants from bible Section 24 ────────────────────────────

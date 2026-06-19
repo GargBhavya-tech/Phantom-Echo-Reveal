@@ -63,10 +63,10 @@ def build_linear_system(spheres: List[SphereConstraint]) -> tuple[np.ndarray, np
     b = np.zeros(n - 1, dtype=np.float64)
 
     for i in range(n - 1):
-        P_i = spheres[i].position
-        P_j = spheres[i + 1].position
-        d_i = spheres[i].distance
-        d_j = spheres[i + 1].distance
+        P_i = np.asarray(spheres[i].position,     dtype=np.float64)
+        P_j = np.asarray(spheres[i + 1].position, dtype=np.float64)
+        d_i = float(spheres[i].distance)
+        d_j = float(spheres[i + 1].distance)
 
         A[i] = 2.0 * (P_j - P_i)
         b[i] = (d_i ** 2 - d_j ** 2
@@ -150,14 +150,25 @@ def triangulate_least_squares(spheres: List[SphereConstraint],
         logger.warning(f"Degenerate system: rank={rank} — 0 points triangulated")
         return None
 
-    # Nonlinear refinement — minimise sum of squared sphere errors
-    def sphere_residuals(Q):
-        errs = []
-        for s in spheres:
-            errs.append(np.linalg.norm(Q - s.position) - s.distance)
-        return errs
+    # Nonlinear refinement — minimise sum of squared sphere errors.
+    # OVERFLOW FIX: do the residual math in float64 and bound the search to a
+    # generous box around the initial estimate. On adversarial/ill-conditioned
+    # geometry the unbounded LM step could shoot Q to ~1e20, where the internal
+    # x.dot(x) in np.linalg.norm overflows float32 and emits a RuntimeWarning.
+    # Bounding the step keeps Q physical and silences the warning at its source.
+    Q0 = np.asarray(Q_init, dtype=np.float64).ravel()
 
-    result = least_squares(sphere_residuals, Q_init, method='lm', max_nfev=100)
+    def sphere_residuals(Q):
+        Q = np.asarray(Q, dtype=np.float64)
+        return [float(np.linalg.norm(Q - np.asarray(s.position, dtype=np.float64)) - s.distance)
+                for s in spheres]
+
+    # ±50 m box around the linear estimate — far larger than any indoor scene,
+    # so it never distorts a valid solution, but prevents numeric blow-up.
+    _span = 50.0
+    result = least_squares(
+        sphere_residuals, Q0, method='trf', max_nfev=100,
+        bounds=(Q0 - _span, Q0 + _span))
 
     Q_refined = result.x
 
@@ -220,238 +231,6 @@ def _compute_confidence(snr_db: float, residual_m: float, n_meas: int) -> float:
     return 0.4 * snr_score + 0.4 * residual_score + 0.2 * count_score
 
 
-def cluster_and_triangulate(measurements: List[dict],
-                             max_distance_diff_m: float = 0.5,
-                             floor_y: float = 0.0) -> List[OccludedSurfacePoint]:
-    """
-    Group echo measurements by approximate distance (same surface echoing)
-    and triangulate each cluster.
-
-    Args:
-        measurements: list of dicts with keys:
-                      'position' (3,), 'distances' (N,), 'snr_db' (float)
-        max_distance_diff_m: cluster tolerance in meters
-
-    Returns:
-        list of triangulated OccludedSurfacePoints (TEAL Gaussians to be placed)
-    """
-    # Flatten all (position, distance) pairs
-    all_constraints: List[SphereConstraint] = []
-    for m in measurements:
-        pos = np.array(m["position"])
-        for d in m["distances"]:
-            all_constraints.append(SphereConstraint(
-                position=pos,
-                distance=float(d),
-                snr_db=float(m.get("snr_db", 10.0))
-            ))
-
-    if not all_constraints:
-        return []
-
-    # Simple distance-based clustering
-    distances = np.array([c.distance for c in all_constraints])
-    sorted_idx = np.argsort(distances)
-    sorted_constraints = [all_constraints[i] for i in sorted_idx]
-    sorted_distances = distances[sorted_idx]
-
-    clusters: List[List[SphereConstraint]] = []
-    current_cluster: List[SphereConstraint] = [sorted_constraints[0]]
-
-    for i in range(1, len(sorted_constraints)):
-        if sorted_distances[i] - sorted_distances[i - 1] <= max_distance_diff_m:
-            current_cluster.append(sorted_constraints[i])
-        else:
-            clusters.append(current_cluster)
-            current_cluster = [sorted_constraints[i]]
-    clusters.append(current_cluster)
-
-    # Triangulate each cluster with 3+ measurements from different positions
-    results = []
-    for cluster in clusters:
-        # BUG-CE10 FIX: spatial dedup with real distance threshold.
-        # np.round(pos, 2) snaps positions 4mm apart to the same key → drops
-        # legitimate unique viewpoints. Use 5cm min-separation instead.
-        MIN_SEP_M = 0.05
-        unique: list = []
-        for c in cluster:
-            is_dup = any(
-                np.linalg.norm(np.array(c.position) - np.array(u.position)) < MIN_SEP_M
-                for u in unique
-            )
-            if not is_dup:
-                unique.append(c)
-        if len(unique) >= 3:
-            point = triangulate_least_squares(unique, floor_y=floor_y)
-            if point is not None:
-                # Residual gate: a wrong association (mixed targets) produces
-                # a point that does NOT satisfy its own sphere constraints.
-                Q = np.array(point.position, dtype=np.float64)
-
-                # Mirror disambiguation: when the phone is carried at constant
-                # height the virtual array is PLANAR, so every solution Q has
-                # a mirror Q' across the array plane with identical residuals.
-                # Physical prior: occluded surfaces hidden behind furniture lie
-                # BELOW phone carry height (gravity — objects rest on supports).
-                pos_y   = np.array([c.position[1] for c in unique])
-                y_plane = float(pos_y.mean())
-                if float(pos_y.std()) < 0.05 and Q[1] > y_plane:
-                    Q_mirror = Q.copy()
-                    Q_mirror[1] = 2.0 * y_plane - Q[1]
-                    if Q_mirror[1] >= floor_y - 0.05:
-                        Q = Q_mirror
-                        point.position = Q
-
-                resid = float(np.mean([abs(np.linalg.norm(Q - c.position) - c.distance)
-                                       for c in unique]))
-                if resid <= 0.03:          # 3cm gate vs 8mm sensor noise
-                    results.append(point)
-                else:
-                    logger.debug(f"SAS v3: rejected track, residual {resid*100:.1f}cm")
-
-    logger.info(f"SAS: {len(clusters)} distance clusters → {len(results)} triangulated points")
-    return results
-
-
-# ── BUG-6 FIX: Surface-aware clustering ──────────────────────────────────────
-
-def cluster_and_triangulate_v2(measurements: List[dict],
-                                 max_distance_diff_m: float = 0.3,
-                                 min_angular_sep_deg: float = 15.0,
-                                 floor_y: float = 0.0) -> List[OccludedSurfacePoint]:
-    """
-    BUG-6 FIX: Replace distance-only clustering with angular-separation check.
-
-    The original grouped echoes purely by round-trip distance similarity
-    (max_distance_diff_m=0.5m). Two echoes from completely different surfaces
-    at similar distances (e.g. wall at 1.3m, chair at 1.7m) fell into the
-    same cluster, producing a meaningless triangulated point.
-
-    Fix:
-        1. Tighten distance tolerance to 0.3m (was 0.5m)
-        2. Within each distance cluster, further split by angular separation:
-           if two measurements from different phone positions produce bearing
-           vectors whose angular separation exceeds min_angular_sep_deg, they
-           are likely from different surfaces → split into sub-clusters.
-        3. Each sub-cluster is triangulated independently.
-
-    Args:
-        measurements:       list of dicts with position, distances, snr_db
-        max_distance_diff_m: maximum round-trip distance gap within one surface (m)
-        min_angular_sep_deg: angular gap that triggers a new sub-cluster (degrees)
-        floor_y:            floor Y for underground clamping
-
-    Returns:
-        list of OccludedSurfacePoints (TEAL)
-    """
-    all_constraints: List[SphereConstraint] = []
-    for m in measurements:
-        pos = np.array(m["position"])
-        for d in m["distances"]:
-            all_constraints.append(SphereConstraint(
-                position=pos,
-                distance=float(d),
-                snr_db=float(m.get("snr_db", 10.0))
-            ))
-
-    if not all_constraints:
-        return []
-
-    # Step 1: distance-based pre-clusters (tightened to 0.3m)
-    distances  = np.array([c.distance for c in all_constraints])
-    sorted_idx = np.argsort(distances)
-    sorted_c   = [all_constraints[i] for i in sorted_idx]
-    sorted_d   = distances[sorted_idx]
-
-    distance_clusters: List[List[SphereConstraint]] = []
-    current = [sorted_c[0]]
-    for i in range(1, len(sorted_c)):
-        if sorted_d[i] - sorted_d[i - 1] <= max_distance_diff_m:
-            current.append(sorted_c[i])
-        else:
-            distance_clusters.append(current)
-            current = [sorted_c[i]]
-    distance_clusters.append(current)
-
-    # Step 2: angular sub-split within each distance cluster
-    final_clusters: List[List[SphereConstraint]] = []
-    for dc in distance_clusters:
-        if len(dc) < 2:
-            final_clusters.append(dc)
-            continue
-        # Centroid of positions in this distance cluster
-        positions = np.array([c.position for c in dc])
-        centroid  = positions.mean(axis=0)
-        # Bearing vector from centroid to each measurement position
-        bearings  = positions - centroid
-        norms     = np.linalg.norm(bearings, axis=1, keepdims=True)
-        bearings  = bearings / (norms + 1e-9)
-
-        sub: List[List[SphereConstraint]] = [[dc[0]]]
-        for i in range(1, len(dc)):
-            placed = False
-            for s in sub:
-                ref_bearing = (np.array([c.position for c in s]) - centroid)
-                ref_bearing = ref_bearing / (np.linalg.norm(ref_bearing, axis=1, keepdims=True) + 1e-9)
-                mean_ref    = ref_bearing.mean(axis=0)
-                cos_sim     = float(np.clip(np.dot(bearings[i], mean_ref), -1, 1))
-                angle_deg   = np.degrees(np.arccos(cos_sim))
-                if angle_deg < min_angular_sep_deg:
-                    s.append(dc[i])
-                    placed = True
-                    break
-            if not placed:
-                sub.append([dc[i]])
-        final_clusters.extend(sub)
-
-    # Step 3: triangulate each final cluster
-    results = []
-    for cluster in final_clusters:
-        MIN_SEP_M = 0.05
-        unique: List[SphereConstraint] = []
-        for c in cluster:
-            is_dup = any(
-                np.linalg.norm(c.position - u.position) < MIN_SEP_M
-                for u in unique
-            )
-            if not is_dup:
-                unique.append(c)
-        if len(unique) >= 3:
-            point = triangulate_least_squares(unique, floor_y=floor_y)
-            if point is not None:
-                # Residual gate: a wrong association (mixed targets) produces
-                # a point that does NOT satisfy its own sphere constraints.
-                Q = np.array(point.position, dtype=np.float64)
-
-                # Mirror disambiguation: when the phone is carried at constant
-                # height the virtual array is PLANAR, so every solution Q has
-                # a mirror Q' across the array plane with identical residuals.
-                # Physical prior: occluded surfaces hidden behind furniture lie
-                # BELOW phone carry height (gravity — objects rest on supports).
-                pos_y   = np.array([c.position[1] for c in unique])
-                y_plane = float(pos_y.mean())
-                if float(pos_y.std()) < 0.05 and Q[1] > y_plane:
-                    Q_mirror = Q.copy()
-                    Q_mirror[1] = 2.0 * y_plane - Q[1]
-                    if Q_mirror[1] >= floor_y - 0.05:
-                        Q = Q_mirror
-                        point.position = Q
-
-                resid = float(np.mean([abs(np.linalg.norm(Q - c.position) - c.distance)
-                                       for c in unique]))
-                if resid <= 0.03:          # 3cm gate vs 8mm sensor noise
-                    results.append(point)
-                else:
-                    logger.debug(f"SAS v3: rejected track, residual {resid*100:.1f}cm")
-
-    logger.info(
-        f"SAS v2: {len(distance_clusters)} distance clusters → "
-        f"{len(final_clusters)} angular sub-clusters → "
-        f"{len(results)} triangulated points"
-    )
-    return results
-
-
 # ── BUG-V22-SAS FIX: echo track association ─────────────────────────────────
 
 def cluster_and_triangulate_v3(measurements: List[dict],
@@ -482,7 +261,12 @@ def cluster_and_triangulate_v3(measurements: List[dict],
     for m in measurements:
         pos    = np.array(m["position"], dtype=np.float64)
         snr    = float(m.get("snr_db", 10.0))
-        echoes = [float(d) for d in m["distances"]]
+        # OVERFLOW/NaN GUARD: drop non-finite or physically-impossible echo
+        # ranges (a corrupt RIR peak can yield inf/NaN). Indoor round-trip
+        # range is bounded well under 50 m; anything past that is spurious and
+        # would otherwise poison the linear system (inf**2 → RuntimeWarning).
+        echoes = [float(d) for d in m["distances"]
+                  if np.isfinite(d) and 0.0 < float(d) < 50.0]
 
         # Predicted next distance per track (constant-velocity in range space:
         # the range-rate to a static target from a smoothly moving phone is

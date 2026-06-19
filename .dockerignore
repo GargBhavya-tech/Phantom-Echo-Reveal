@@ -1,0 +1,13 @@
+# Keep the image small and reproducible
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.git/
+datasets/_redwood_raw/
+datasets/*.zip
+*.zip
+uploads/
+.pytest_cache/

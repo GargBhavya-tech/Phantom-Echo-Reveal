@@ -48,15 +48,12 @@ logger = logging.getLogger(__name__)
 #   GREEN (generated)    → low positive
 #   ORANGE (dynamic)     → low positive, but decays on next frame ← was 0.0
 #   RED (unknown)        → 0.0 (no update — unknown stays unknown)
-LOG_ODDS_SENSOR = {
-    "WHITE":  3.0,    # ARKit high-confidence direct measurement
-    "BLUE":   2.0,    # Physically proven — high certainty occupied
-    "TEAL":   1.8,    # Acoustic measured — near-certain occupied
-    "YELLOW": 1.2,    # Physically probable (structurally observed ARKit geo)
-    "GREEN":  0.7,    # AI generated — moderate certainty
-    "ORANGE": 0.5,    # Dynamic object — low certainty, decays via age
-    "RED":    0.0,    # Unknown — no update, preserve prior
-}
+# BUG-A FIX (v27): this table previously DIVERGED from gaussian_format.TAG_LOG_ODDS
+# on BLUE/TEAL/GREEN/YELLOW (e.g. GREEN 0.7 here vs 1.5 there → 66.8% vs 81.8%
+# occupancy), so the navigation costmap weighted generated geometry far less
+# blocking than the rest of the system believed. There must be ONE source of
+# truth. Import it. The keys match (tags are plain strings: TAG_BLUE == "BLUE").
+from src.shared.gaussian_format import TAG_LOG_ODDS as LOG_ODDS_SENSOR
 
 LOG_ODDS_FREE      = -0.5   # Ray cast through free space
 LOG_ODDS_MIN       = -5.0   # Clamp floor (always-free saturation)
@@ -144,30 +141,46 @@ class OccupancyGrid:
         robot_pos: np.ndarray,
         radius_m: float,
         unknown_lo: float = 0.35,
-        unknown_hi: float = 0.65
+        unknown_hi: float = 0.65,
     ) -> List[np.ndarray]:
-        """
-        Return world positions of UNKNOWN voxels within radius_m of robot_pos.
-        UNKNOWN = probability in (unknown_lo, unknown_hi).
-        Called by auto_trigger.py Mode B navigation.
+        """Return world positions of UNKNOWN voxels within `radius_m` of robot_pos.
+
+        UNKNOWN = occupancy probability in (unknown_lo, unknown_hi). Called by
+        auto_trigger.py for Mode-B exploration target selection.
+
+        Why the voxel-AABB bound: this is a *local* query, but a naive full-grid
+        meshgrid allocates three X*Y*Z coordinate arrays + a distance array
+        regardless of `radius_m` — O(grid) memory and time even for a 0.8 m
+        search (a 5x2.5x4 m room at 5 cm is ~400k voxels). We restrict the scan
+        to the integer voxel box covering the query sphere (O(radius^3)). The
+        returned voxel set — and its lexicographic (C-order) ordering — is
+        identical to the old full-grid scan, because every in-radius voxel lies
+        inside that box; only the wasted work outside it is removed.
         """
         prob = self.probability()
-        X, Y, Z = self.shape
-        xi = np.arange(X, dtype=np.float32)
-        yi = np.arange(Y, dtype=np.float32)
-        zi = np.arange(Z, dtype=np.float32)
-        gx, gy, gz = np.meshgrid(xi, yi, zi, indexing='ij')
+        r_vox = int(np.ceil(radius_m / self.voxel_size))
+        center = self.world_to_voxel(np.asarray(robot_pos, dtype=np.float64))
+        lo = np.maximum(center - r_vox, 0)
+        hi = np.minimum(center + r_vox + 1, np.array(self.shape))
+        if np.any(hi <= lo):                       # query box entirely off-grid
+            return []
+
+        xi = np.arange(lo[0], hi[0], dtype=np.float32)
+        yi = np.arange(lo[1], hi[1], dtype=np.float32)
+        zi = np.arange(lo[2], hi[2], dtype=np.float32)
+        gx, gy, gz = np.meshgrid(xi, yi, zi, indexing="ij")
         wx = self.origin[0] + (gx + 0.5) * self.voxel_size
         wy = self.origin[1] + (gy + 0.5) * self.voxel_size
         wz = self.origin[2] + (gz + 0.5) * self.voxel_size
         dist = np.sqrt(
-            (wx - robot_pos[0])**2 +
-            (wy - robot_pos[1])**2 +
-            (wz - robot_pos[2])**2
+            (wx - robot_pos[0]) ** 2 +
+            (wy - robot_pos[1]) ** 2 +
+            (wz - robot_pos[2]) ** 2
         )
-        mask = (dist <= radius_m) & (prob > unknown_lo) & (prob < unknown_hi)
-        indices = np.argwhere(mask)
-        return [self.voxel_to_world(idx) for idx in indices]
+        sub_prob = prob[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+        mask = (dist <= radius_m) & (sub_prob > unknown_lo) & (sub_prob < unknown_hi)
+        local_indices = np.argwhere(mask)          # local to the sub-box
+        return [self.voxel_to_world(idx + lo) for idx in local_indices]
 
 
 def _update_log_odds(grid: OccupancyGrid,

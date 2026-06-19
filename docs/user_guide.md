@@ -36,31 +36,32 @@ pip install -r requirements.txt
 python -m src.main --mode demo --output output/
 ```
 
-Expected output:
+Expected output (abridged — exact counts/timing vary by machine):
 ```
-2026-06-01 12:00:00 [INFO] PHANTOM-ECHO REVEAL v17 — Pipeline Start
-2026-06-01 12:00:00 [INFO] Team: Chole Bhhature | IIIT Bangalore | PS-09
-2026-06-01 12:00:01 [INFO] Layer 0: 10 acoustic positions processed
-2026-06-01 12:00:01 [INFO] Layer 1: 3072 disk Gaussians created
-2026-06-01 12:00:01 [INFO] Layer 2: PHANTOM-LITE Contradiction Engine start
-2026-06-01 12:00:01 [INFO]   region_chair (CHAIR): POSSIBLE → GREEN
-2026-06-01 12:00:01 [INFO]   region_table (TABLE): POSSIBLE → GREEN
-2026-06-01 12:00:01 [INFO]   region_sofa  (SOFA):  POSSIBLE → GREEN
-2026-06-01 12:00:01 [INFO]   region_wall_b (WALL): PROVEN  → BLUE
-2026-06-01 12:00:02 [INFO] Layer 3: 3 regions sent for generation
-2026-06-01 12:00:02 [INFO] Layer 4: Output → output/
-2026-06-01 12:00:02 [INFO] Pipeline complete in 1.84s
+[INFO] phantom.main: PHANTOM-ECHO REVEAL v29 — Full Pipeline
+[INFO] phantom.main: [Layer 2] SAS v3: 8 measurements → 1 triangulated point
+[INFO] phantom.main: [Layer 2a] Proactive laws built BLUE floor/ceiling/wall Gaussians
+[INFO] phantom.main: [Layer 2c] Seeded 144 RED voxels in occluded volumes → generation will run
+[INFO] phantom.main: [Layer 3]   Generated 200 GREEN Gaussians via template
+[INFO] phantom.main: Pipeline complete in ~10–35s
+  white: 918   blue: 27441   teal: 1   green: 200   red: 144
 ```
+Writes `output/summary.json`, `output/mesh.ply`, `output/costmap.npy`.
 
-### Step 3 — Open the 3D viewer
+### Step 3 — Open the live 3D dashboard
 
-Open `src/edge/ui/viewer.html` in Chrome, Firefox, or Edge.
+```bash
+python -m src.main --mode realtime          # → http://localhost:8000
+```
+Open `http://localhost:8000` in Chrome/Firefox/Edge and click **▶ Start live scan**.
 
 You will see:
-- 🔵 Blue Gaussians — proven visible surfaces (walls, floor, ceiling)
-- 🩵 Teal Gaussians — acoustic bat-sonar measured points
-- 🟢 Green Gaussians — AI-generated occluded geometry
-- 🔴 Red Gaussians — unknown regions
+- ⬜ White — high-confidence ARKit sensor points
+- 🔵 Blue — physics-built floor/ceiling/wall priors
+- 🩵 Teal — acoustic bat-sonar measured points
+- 🟢 Green — AI/template-generated occluded geometry
+- 🟡 Yellow — physically-probable soft prior
+- 🔴 Red — unknown regions (left open in the nav map)
 
 Use the layer toggles to show/hide each confidence category.
 Drag to orbit, scroll to zoom.
@@ -70,19 +71,24 @@ Drag to orbit, scroll to zoom.
 ## Run Evaluation
 
 ```bash
-python -m src.eval.evaluate \
-    --mode simulation \
-    --scene living_room_01 \
-    --output output/eval_results.json
+# A. Synthetic 3-scene self-consistency benchmark (closed-loop)
+python -m src.main --mode eval          # → output/eval_results.json
+
+# B. Blind real-data held-out test (the honest, non-circular headline)
+python -m src.eval.run_real_eval --dataset datasets/redwood_sample --frames 4
+#                                        → output/real_data_eval.json
 ```
 
-Expected KPI output:
+Honest KPI summary (committed artifacts; targets per README):
 ```
-F1 Score:             [run: python -m src.eval.run_eval]  (target≥0.97, atlas=0.85)
-Semantic Accuracy:    0.942  (target≥0.93, atlas=0.80) [✓]
-Recon Error:          [run: python -m src.eval.run_eval]  (target<1.5cm, atlas=5.0cm)
-ALL KPIs MET:         ✓ YES
+                        Synthetic (closed-loop)     Real held-out (blind)
+F1 @ 5cm   (target≥0.85)  0.858 mean (1/3 @5cm)      0.957   ✓
+F1 @ 10cm  (target≥0.85)  0.879 mean   ✓             0.998   ✓
+Semantic   (target≥0.93)  0.957  ✓                   —
+Recon err  (target<1.5cm) ~0.0cm (circular)          0.98cm  ✓
 ```
+The synthetic benchmark reports `all_kpis_met: false` (office/bedroom clear 0.85
+only at 10 cm). Quote the **real held-out** column as the accuracy headline.
 
 ---
 
@@ -160,10 +166,13 @@ Before each session, run room calibration:
 ### Walking protocol for SAS
 
 For best triangulation accuracy:
-- Walk in a straight line of at least 1.5m (creates sufficient aperture)
-- Hold phone at ~waist height (1.0–1.2m)
-- Walk at steady pace (0.3–0.5 m/s)
-- Each chirp is emitted automatically every 200ms during walking
+- Walk a **curved / zigzag** path (an arc or XZ zigzag), NOT a straight line —
+  a collinear walk makes the SAS linear system rank-deficient and triangulates
+  0 points (the code warns about this in `sas_triangulator._check_collinearity`).
+- Cover at least ~1.5m of baseline with lateral variation
+- Hold phone at roughly constant height (1.0–1.2m) — the planar-array mirror
+  prior assumes near-constant carry height
+- Walk at a steady pace (0.3–0.5 m/s); a chirp is emitted automatically every 200ms
 
 ---
 
@@ -196,24 +205,23 @@ print(f"Mesh: {len(mesh.vertices)} vertices, {len(mesh.triangles)} triangles")
 To exactly reproduce the evaluation results in the submission:
 
 ```bash
-# Fixed random seed evaluation
-python -m src.eval.evaluate \
-    --mode simulation \
-    --scene living_room_01 \
-    --output output/reproduced_eval.json
+# One command regenerates every output/ artifact and runs the integrity suite:
+./reproduce.sh            # Linux/macOS
+powershell -ExecutionPolicy Bypass -File .\reproduce.ps1   # Windows
 
-# Compare with reference
+# Or compare the synthetic aggregate directly:
 python -c "
 import json
-with open('output/reproduced_eval.json') as f: r = json.load(f)
-print(f'F1: {r[\"f1_score\"]:.4f}')
-print(f'Semantic: {r[\"semantic_accuracy\"]:.4f} (expected ~0.942)')
-print(f'Error: {r[\"reconstruction_error_cm\"]:.2f}cm')
+d = json.load(open('output/eval_results.json'))
+print(f'mean_f1:       {d[\"mean_f1\"]:.4f}  (expected ~0.858)')
+print(f'mean_semantic: {d[\"mean_semantic\"]:.4f} (expected ~0.957)')
+print(f'all_kpis_met:  {d[\"all_kpis_met\"]}')
 "
 ```
 
-All random seeds are fixed (numpy seed=42, generation seed=hash(region_id) % 2^31)
-so results are deterministic across machines.
+Generation seeds are fixed (numpy seed=42) so the synthetic benchmark is
+deterministic on a given machine/library set. Quote the real held-out number
+(`output/real_data_eval.json`) as the headline.
 
 ---
 
@@ -232,9 +240,10 @@ Use Chrome 113+ or Firefox 112+. Enable hardware acceleration in browser setting
 Ensure at least 3 phone positions with >5cm baseline between them.
 Check that `distances` array is non-empty in acoustic measurements.
 
-**KPI F1 below 0.97**
-This can happen if numpy random state differs across numpy versions.
-Pin numpy: `pip install numpy==1.26.4`
+**Synthetic F1 differs slightly across machines**
+The synthetic benchmark depends on numpy/scipy versions (KD-tree, RNG). Small
+drift is expected; the committed `output/eval_results.json` (mean F1@5cm 0.858)
+is the reference. The accuracy headline is the real held-out number, not this.
 
 ---
 

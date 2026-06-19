@@ -4,25 +4,38 @@
   "frames_reconstructed": 4,
   "frames_held_out": 1,
   "engine_state": "complete",
-  "n_scene_gaussians": 30808,
-  "wall_time_s": 101.95,
+  "n_scene_gaussians": 27480,
+  "wall_time_s": 15.34,
   "metric": {
-    "f1_5cm": 0.7711,
-    "f1_10cm": 0.9899,
-    "precision_5cm": 0.632,
-    "recall_5cm": 0.9888,
-    "recon_err_cm": 1.76,
-    "n_pred": 16250,
+    "f1_5cm": 0.9565,
+    "f1_10cm": 0.9977,
+    "precision_5cm": 0.9215,
+    "recall_5cm": 0.9943,
+    "recon_err_cm": 1.0,
+    "n_pred": 16312,
     "protocol": "held-out frame (never seen during reconstruction); primary metric over directly-sensed reconstruction (WHITE/TEAL/RED/YELLOW), GT depth capped at 5m",
     "n_gt_points": 4016,
     "full_scene": {
-      "f1_5cm": 0.5708,
-      "f1_10cm": 0.8696,
-      "precision_5cm": 0.4004,
-      "recall_5cm": 0.9933,
-      "recon_err_cm": 1.69,
-      "n_pred": 30808
+      "f1_5cm": 0.7955,
+      "f1_10cm": 0.9279,
+      "precision_5cm": 0.6614,
+      "recall_5cm": 0.9978,
+      "recon_err_cm": 0.97,
+      "n_pred": 27480
     }
   },
-  "note": "This is a BLIND metric: ground truth is a real depth frame the reconstruction never observed. Contrast with output/eval_results.json which is a closed-loop synthetic consistency check."
+  "mesh": {
+    "point_cloud_ply": "output/scene_gaussians_real.ply",
+    "n_points_exported": 25842,
+    "mesh_ply": "output/mesh_real_spsr.ply",
+    "n_triangles": 143201,
+    "n_vertices": 72458,
+    "mesh_f1_5cm": 0.7657,
+    "mesh_f1_10cm": 0.9128,
+    "mesh_precision_5cm": 0.6245,
+    "mesh_recall_5cm": 0.9895,
+    "mesh_chamfer_cm": 2.93,
+    "n_mesh_samples": 8000
+  },
+  "note": "BLIND metric: ground truth is a real depth frame the reconstruction never observed. Contrast with output/eval_results.json which is a closed-loop synthetic consistency check."
 }

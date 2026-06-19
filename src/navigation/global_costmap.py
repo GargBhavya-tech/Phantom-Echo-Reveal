@@ -127,8 +127,20 @@ class GlobalCostmap:
         }
 
     def is_free(self, world_x: float, world_z: float) -> bool:
+        """Returns False (blocked/unknown) for out-of-map or blocked coordinates.
+
+        BUG-7 FIX: the original compound check
+            `not (0 <= ci < h and 0 <= cj < w)`
+        is logically correct but relies on Python's short-circuit evaluation
+        and is easy to mis-read. More critically, if ci or cj is computed as
+        a negative integer (world coord < map origin), the compound expression
+        evaluates `0 <= -2` = False and returns False as expected — BUT only
+        accidentally. Use four explicit comparisons so the intent is clear and
+        any future refactor cannot silently introduce negative-index wrapping.
+        """
         ci, cj = self._world_to_cell(world_x, world_z)
-        if not (0 <= ci < self._h_cells and 0 <= cj < self._w_cells):
+        # Explicit non-negative check prevents negative-index numpy array wrapping
+        if ci < 0 or cj < 0 or ci >= self._h_cells or cj >= self._w_cells:
             return False
         return int(self._grid[ci, cj]) < CELL_INSCRIBED
 
@@ -179,8 +191,13 @@ class LocalCostmap:
         Now uses DBSCAN to cluster ORANGE points by proximity (0.8m radius),
         then inflates one circle per cluster so each person/object is a
         separate obstacle in the costmap.
+
+        BUG-PROD-6 FIX: always reset _dynamic_cells at the top of this method.
+        If called with an empty list (between scans or when no dynamic objects
+        are detected), the stale circles from the previous session are erased
+        so get_merged_grid() never returns ghost obstacles.
         """
-        self._dynamic_cells[:] = 0
+        self._dynamic_cells[:] = 0   # BUG-PROD-6 FIX: unconditional reset
 
         if not dynamic_gaussians:
             return
@@ -213,6 +230,18 @@ class LocalCostmap:
                         ni, nj = ci + di, cj + dj
                         if 0 <= ni < h and 0 <= nj < w:
                             self._dynamic_cells[ni, nj] = CELL_LETHAL
+
+    def reset_dynamic(self) -> None:
+        """BUG-PROD-6 FIX: explicitly zero _dynamic_cells between scan sessions.
+
+        Call this when starting a new scan so ghost obstacles from the previous
+        session do not bleed into the fresh costmap. update_dynamic_obstacles()
+        already resets on each call, but reset_dynamic() is a belt-and-suspenders
+        explicit reset for callers (e.g. engine.py /api/reset) who may not call
+        update_dynamic_obstacles() before the first get_merged_grid().
+        """
+        self._dynamic_cells[:] = 0
+        logger.debug("LocalCostmap: dynamic cells reset")
 
     def get_merged_grid(self) -> np.ndarray:
         """Merge base + dynamic costmaps."""

@@ -1,23 +1,137 @@
-# Python cache
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHANTOM-ECHO REVEAL — .gitignore
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
 **/__pycache__/
-**/*.pyc
+*.py[cod]
 *.pyo
 *.pyd
+*.pdb
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
 
-# Environments
-.env
-.venv
-env/
+# ── Virtual environments ───────────────────────────────────────────────────────
+.venv/
 venv/
+env/
 ENV/
 env.bak/
 venv.bak/
+v/
 
-# Project specific
-output/
+# ── Secrets & local config (NEVER commit) ─────────────────────────────────────
+.env
+# .env.example is committed on purpose (safe template, no secrets)
+
+# ── User photo uploads (personal data, huge files) ────────────────────────────
+# All runtime uploads go here — none of these belong in version control
 uploads/
-datasets/
 
-# Unnecessary files
-walkthrough.md
-phantom_echo_analysis.md
+# ── Large scratch archives ────────────────────────────────────────────────────
+abc.zip
+*.zip
+*.tar.gz
+*.tar.bz2
+*.7z
+
+# ── Large generated output files (regenerable, not needed by judges) ──────────
+# All .ply and .npy are large generated binaries — ignore by default.
+*.ply
+*.npy
+# Explicit exceptions for files judges need committed:
+!output/mesh_semantics.json
+
+# Named output files to ignore (regenerable with reproduce.sh)
+output/summary.json
+output/acoustic_trace.json
+output/depth_completion_eval.json
+output/eval_bedroom_01.json
+output/eval_living_room_01.json
+output/eval_multi_scene.json
+output/eval_office_01.json
+output/agent_trace.json
+output/mode_b_demo/
+
+# Keep these committed (KPI artifacts & standalone demo judges need offline):
+# output/real_data_eval.json   ← headline F1@5cm 0.957
+# output/eval_results.json     ← synthetic consistency benchmark
+# output/atlas_baseline.json   ← baseline comparison
+# output/acoustic_demo.json    ← baked DSP data for sonar demo
+# output/sonar_reveal.html     ← standalone sonar demo (double-click)
+
+# ── Datasets — only keep the offline eval sample ──────────────────────────────
+# datasets/redwood_sample/ is committed (judges run real eval offline)
+datasets/_redwood_raw/       # raw download cache, regenerable
+datasets/redwood_sample.zip  # source zip, regenerable
+datasets/CACHEDIRT.TAG
+
+# ── Model checkpoints & weights (too large, not committed) ───────────────────
+models/*.pt
+models/*.pth
+models/*.onnx
+models/*.bin
+models/*.safetensors
+models/*.corrupted
+# Hugging Face cache (downloaded at runtime)
+.cache/huggingface/
+~/.cache/huggingface/
+
+# ── IDE & editor files ────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── pytest & coverage ─────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+coverage.xml
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Test scratch output ────────────────────────────────────────────────────────
+test_out.txt
+output/demo_frames/
+
+# ── Docker (Dockerfile and .dockerignore are committed on purpose) ────────────
+# Do NOT add Dockerfile or .dockerignore here — judges need them for `docker build`
+
+# ── Misc scratch ──────────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+check_pipeline.py    # one-off debug script, not part of the submission
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FILES COMMITTED ON PURPOSE — do NOT add blanket ignores for these dirs
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# datasets/redwood_sample/        → real RGB-D eval data (judges run offline)
+# output/real_data_eval.json      → headline KPI artifact (F1@5cm 0.957)
+# output/eval_results.json        → synthetic consistency benchmark
+# output/atlas_baseline.json      → comparison table
+# output/acoustic_demo.json       → baked sonar DSP data (drives sonar_reveal.html)
+# output/sonar_reveal.html        → standalone sonar demo (double-click, no server)
+# output/mesh_semantics.json      → small metadata file
+# PHANTOM_ECHO_REVEAL_Presentation.pptx  → hackathon submission slides
+# bible.txt                       → project design spec (judges may want context)
+# .env.example                    → safe config template (no secrets)
+# .dockerignore                   → needed for `docker build`
+# Dockerfile                      → one-command containerised demo
+# reproduce.sh / reproduce.ps1    → one-command artifact regeneration
+# requirements.txt                → pinned dependency list
+#

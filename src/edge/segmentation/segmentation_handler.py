@@ -235,6 +235,11 @@ def classify_with_mobileclip(rgb_crop: np.ndarray) -> Tuple[str, float]:
         (semantic_label, confidence_score)
     """
     try:
+        import os
+        # v28: don't auto-download CLIP (~600MB) just because transformers is
+        # installed; the demo doesn't need it. Opt in with PHANTOM_EMBED_BACKEND=clip.
+        if os.environ.get("PHANTOM_EMBED_BACKEND", "").lower() != "clip":
+            return "UNKNOWN", 0.0
         import torch
         from transformers import CLIPProcessor, CLIPModel
 

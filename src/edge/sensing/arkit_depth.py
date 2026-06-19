@@ -376,6 +376,33 @@ class SyntheticDepthGenerator:
                 # 5cm — the planar-array mirror prior in sas_triangulator v3
                 # requires near-planar positions (std<5cm) and outperforms
                 # the better-conditioned but unconstrained system.
-            yaw = np.pi / 2   # facing along Z
+            elif axis == "arc":
+                # v23 acoustic-honesty fix: smooth 3D arc. Small consecutive
+                # steps keep the v3 echo-track association stable, while the
+                # rotating tangent + gentle height ramp make the SAS linear
+                # system full-rank (rank-3) so triangulation actually fires.
+                # This is also a better reconstruction path (more viewpoint
+                # diversity) than a straight line.
+                #
+                # BUG-PROD-3 FIX: clamp camera Y so it never exits the room
+                # regardless of n_frames. Previously pos[1] = start[1]-0.25+0.06*i
+                # → for n_frames=20 the camera reaches 1.2-0.25+1.14=2.09m,
+                # exiting a 2.5m room at i=13+, yielding 0 depth hits.
+                # Also: n_frames=1 with arc used cx_room+0.45 (not start_pos)
+                # as the origin — now start_pos is used directly at i=0.
+                room_y = self.room.get("y", 2.5)
+                cx_room = start_pos[0] + 0.5
+                cz_room = start_pos[2] + 0.2
+                theta = 0.45 * i
+                pos[0] = cx_room + 0.45 * np.cos(theta)
+                raw_y  = start_pos[1] - 0.25 + 0.06 * i
+                pos[1] = float(np.clip(raw_y, 0.5, room_y - 0.3))
+                pos[2] = cz_room + 0.45 * np.sin(theta)
+                # face roughly toward room interior (+Z/+X)
+                yaw = np.pi / 2 - theta * 0.3
+                frames.append(self.generate_frame(pos, camera_yaw=yaw))
+                continue
+
+            yaw = np.pi / 2   # facing along Z (default for x/z/xz)
             frames.append(self.generate_frame(pos, camera_yaw=yaw))
         return frames

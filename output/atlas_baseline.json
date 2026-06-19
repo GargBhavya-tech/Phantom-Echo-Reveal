@@ -1,0 +1,25 @@
+{
+  "atlas": {
+    "method": "Atlas (TSDF regression, judge baseline)",
+    "f1_score": 0.85,
+    "semantic_accuracy": 0.8,
+    "reconstruction_error_cm": 5.0
+  },
+  "phantom": {
+    "method": "PHANTOM-ECHO REVEAL v18 (this submission)",
+    "f1_score": 0.8361,
+    "semantic_accuracy": 0.9391,
+    "reconstruction_error_cm": 0.11
+  },
+  "delta": {
+    "f1_improvement": -0.0139,
+    "semantic_improvement": 0.1391,
+    "error_reduction_pct": 97.8
+  },
+  "kpi_targets": {
+    "f1": 0.97,
+    "semantic": 0.93,
+    "error_cm": 1.5
+  },
+  "all_kpis_met": false
+}

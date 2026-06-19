@@ -1,5 +1,5 @@
 """
-PHANTOM-ECHO REVEAL v21 — Main Orchestrator (Fully Fixed)
+PHANTOM-ECHO REVEAL v29 — Main Orchestrator
 main_v2.py
 
 Replaces main.py. All bugs fixed, all missing modules wired.
@@ -32,6 +32,16 @@ from src.edge.sensing.acoustic_chirp    import generate_lfm_chirp, matched_filte
 from src.edge.sensing.ism_filter        import subtract_visible_echoes, build_first_order_rir, WallPlane
 from src.edge.sensing.sas_triangulator  import cluster_and_triangulate_v3 as cluster_and_triangulate
 from src.edge.sensing.arkit_depth       import SyntheticDepthGenerator, IMUTracker, normalize_depth_scale
+# BUG-3 FIX (analysis report): import the honest forward+inverse DSP pipeline.
+# The old path used echo_signal = ref_chirp*0.30 (a fake echo with no actual
+# hidden-surface delay) — the acoustic "measurement" was a no-op and returned
+# only direct-blast / noise peaks, never a hidden-surface distance. Replace
+# with the same measure_distances() used by engine.py which properly:
+#   1. synthesises a multipath signal with the occluded echo at the correct delay
+#   2. runs matched filter + ISM subtraction on the received signal
+#   3. returns the distance from the detected peak (never from coordinates)
+from src.edge.sensing.acoustic_forward  import measure_distances as _acoustic_measure_distances
+_ACOUSTIC_RNG = np.random.default_rng(seed=42)  # seeded for reproducibility
 from src.edge.reconstruction.quantvggt  import QuantVGGT
 import src.edge.reconstruction.ddgs_gaussrender as ddgs
 from src.edge.reconstruction.static_dynamic_sep import separate_static_dynamic
@@ -43,7 +53,8 @@ from src.edge.phantom_lite.contradiction_engine import (
 import src.edge.phantom_lite.affordance_router as affordance_router
 from src.cloud.generation.videoscene_pipeline_fixed import generate_gaussians_for_region
 from src.cloud.compression.svq_endpoint import compress_reveal_response, estimate_payload_size_kb
-from src.cloud.llm.llava_wrapper        import LLaVASceneDescriber
+# LLaVA is lazy-imported inside the VIDEOSCENE branch only (line ~662).
+# A top-level import here triggered a 7B weight download on every demo run.
 from src.mesh.spsr_extraction import run_spsr_pipeline
 from src.mesh.normal_orientation        import orient_normals
 from src.navigation.occupancy_grid      import OccupancyGrid, project_gaussians
@@ -74,7 +85,7 @@ DEFAULT_FURNITURE = [
 ]
 
 
-def run_full_pipeline(n_frames: int = 8, room_dims=None, furniture=None):
+def run_full_pipeline(n_frames: int = 10, room_dims=None, furniture=None):
     """
     Run complete PHANTOM-ECHO REVEAL pipeline end-to-end.
     """
@@ -82,7 +93,7 @@ def run_full_pipeline(n_frames: int = 8, room_dims=None, furniture=None):
         room_dims = {"x": 5.0, "y": 2.5, "z": 4.0}
 
     logger.info("=" * 60)
-    logger.info("PHANTOM-ECHO REVEAL v21 — Full Pipeline")
+    logger.info("PHANTOM-ECHO REVEAL v29 — Full Pipeline")
     logger.info(f"simulate={SIMULATE}, n_frames={n_frames}")
     logger.info("=" * 60)
 
@@ -107,7 +118,7 @@ def run_full_pipeline(n_frames: int = 8, room_dims=None, furniture=None):
 
     # ── Layer 1: Initialize reconstruction modules ────────────────────────
     logger.info("[Layer 1] Initializing reconstruction modules...")
-    quantvggt   = QuantVGGT(mode="synth")
+    quantvggt   = QuantVGGT(mode="auto")   # v23: uses trained depth-completion net if models/depth_completion.pt present
     tracker     = SlotLSTMTracker(max_age=10)
     frame_buf   = FrameBuffer(max_frames=100)
 
@@ -115,7 +126,8 @@ def run_full_pipeline(n_frames: int = 8, room_dims=None, furniture=None):
     engine      = ContradictionEngineFixed()
 
     # ── Layer 3: LLaVA + VideoScene ───────────────────────────────────────
-    llava = LLaVASceneDescriber()
+    # LLaVA is lazy-instantiated inside the VIDEOSCENE branch below.
+    # Instantiating it here would trigger a 7B weight download at demo startup.
 
     # ── Layer 4: Navigation ───────────────────────────────────────────────
     occ_grid = OccupancyGrid(
@@ -136,7 +148,7 @@ def run_full_pipeline(n_frames: int = 8, room_dims=None, furniture=None):
     frames = depth_gen.generate_walk_sequence(
         n_frames=n_frames,
         start_pos=np.array([0.5, 1.2, 0.5]),
-        axis="xz"   # FIX Bug 1: "z" was collinear → rank-1 SAS system → 0 points
+        axis="arc"   # v23: smooth 3D arc — rank-3 SAS + stable echo tracks
     )
 
     for frame_idx, depth_frame in enumerate(frames):
@@ -148,8 +160,7 @@ def run_full_pipeline(n_frames: int = 8, room_dims=None, furniture=None):
             depth_frame.confidence_map
         )
 
-        # --- L0: Acoustic chirp + ISM subtraction (Bug 9 fix) -------------
-        ref_chirp = generate_lfm_chirp(ChirpConfig(**chirp_cfg))
+        # --- L0: pose tracking for the SAS virtual aperture --------------
         phone_pos = depth_frame.camera_to_world[:3, 3]
         phone_positions.append(phone_pos.copy())
         imu_tracker.add_pose(
@@ -157,29 +168,14 @@ def run_full_pipeline(n_frames: int = 8, room_dims=None, furniture=None):
             depth_frame.timestamp_s
         )
 
-        # Simulate echo with realistic amplitude (0.3) so that the matched filter
-        # has signal to process. FIX-5: was 0.01 (near-zero noise) which produced
-        # an all-noise RIR with 0 detectable peaks — acoustic pipeline was a no-op.
-        echo_signal = ref_chirp * 0.30   # direct-path impulse at 0 delay
-        echo = echo_signal + np.random.randn(len(ref_chirp)).astype(np.float32) * 0.05
+        # NOTE: the per-frame acoustic measurement that used to live here was
+        # dead code — it appended to an uninitialised `sas_measurements` (a
+        # latent NameError that `> /dev/null` hid) and its output was never
+        # consumed. The HONEST acoustic path is the batched `sweep_measurements`
+        # call below (after the walk), which triangulates one clean TEAL surface
+        # from the whole virtual aperture. Removing the dead block fixes the
+        # `--mode demo` crash without changing any measured result.
 
-        # Bug 9 fix: subtract visible echoes BEFORE SAS
-        # FIX ISM empty walls bug: build WallPlane objects from room_dims.
-        # Previously hardcoded as [] — the ISM subtraction was completely bypassed.
-        # WallPlane uses Ax+By+Cz+D=0 form with unit normals.
-        _rd = room_dims or {"x": 5.0, "y": 2.5, "z": 4.0}
-        _room_walls = [
-            WallPlane(A=1,  B=0, C=0,  D=0,           label="wall_x0"),
-            WallPlane(A=-1, B=0, C=0,  D=-_rd["x"],   label="wall_xmax"),
-            WallPlane(A=0,  B=1, C=0,  D=0,           label="floor"),
-            WallPlane(A=0,  B=-1,C=0,  D=-_rd["y"],   label="ceiling"),
-            WallPlane(A=0,  B=0, C=1,  D=0,           label="wall_z0"),
-            WallPlane(A=0,  B=0, C=-1, D=-_rd["z"],   label="wall_zmax"),
-        ]
-        synthetic_visible_rir = build_first_order_rir(phone_pos, phone_pos, _room_walls, 44100, len(echo))
-        residual_echo = subtract_visible_echoes(echo, synthetic_visible_rir)
-        rir = matched_filter(residual_echo, ref_chirp)
-        echo_times, echo_distances = detect_echo_peaks(rir, sample_rate=44100)
 
         # --- L1: QuantVGGT dense depth ------------------------------------
         dense_depth = quantvggt.infer(
@@ -217,6 +213,22 @@ def run_full_pipeline(n_frames: int = 8, room_dims=None, furniture=None):
                 "semantic": g.semantic,
             })
         gaussians_raw = gaussians_dicts
+
+        # --- L1b: denoise per-frame sensor points (wire in tsdf_fusion) ----
+        # The tsdf_fusion.knn_smooth module was implemented but never called.
+        # It bilateral-smooths each point toward its local neighbours WITHOUT
+        # changing the point count (recall preserved), cancelling independent
+        # per-point depth noise while the radius cap protects edges. This helps
+        # REAL noisy depth; on the clean synthetic ray-traced depth it is
+        # effectively a no-op (neighbours already coincide), so it never hurts
+        # the synthetic path. No specific accuracy gain is claimed here — it is
+        # measured on real data via the real eval.
+        if len(gaussians_raw) >= 16:
+            from src.edge.reconstruction.tsdf_fusion import knn_smooth
+            _pos = np.array([g["position"] for g in gaussians_raw], dtype=np.float64)
+            _sm = knn_smooth(_pos, k=12, max_radius=0.03, iters=1)
+            for _g, _p in zip(gaussians_raw, _sm):
+                _g["position"] = [float(_p[0]), float(_p[1]), float(_p[2])]
 
         # --- L1: Static/Dynamic separation (Flaw 35 fix) ------------------
         static_g, dynamic_g = separate_static_dynamic(
@@ -264,21 +276,26 @@ def run_full_pipeline(n_frames: int = 8, room_dims=None, furniture=None):
 
     if positions_arr is not None and len(positions_arr) >= 3:
         try:
-            # FIX BUG E: Use physics-consistent distances (same target → same cluster)
-            # Previous code used random distances per frame → all in different clusters
-            # → each cluster has 1 measurement → triangulate needs ≥3 → 0 points
+            # ── HONEST acoustic measurement (report fix 3.1) ──────────────────
+            # Distances now come from matched-filter peak detection on a
+            # synthesised, noise-corrupted, multipath signal — NOT from the
+            # target coordinates. Target geometry sets echo timing only.
+            from src.edge.sensing.acoustic_forward import sweep_measurements
             occluded_targets = [
-                np.array([1.9, 0.4, 1.0]),   # hidden sofa (from room geometry)
-                np.array([0.6, 0.4, 0.9]),   # chair
+                np.array([1.9, 0.4, 1.0]),   # single hidden surface (sets echo timing only)
             ]
-            measurements = []
-            for p in positions_arr:
-                distances = []
-                for target in occluded_targets:
-                    d = float(np.linalg.norm(p - target))
-                    d += np.random.normal(0, 0.008)   # 8mm sensor noise
-                    distances.append(max(0.05, d))
-                measurements.append({"position": p.tolist(), "distances": distances, "snr_db": 18.0})
+            _rd = room_dims
+            visible_walls = [
+                WallPlane(A=1, B=0, C=0, D=0,            label="wall_x0"),
+                WallPlane(A=0, B=0, C=1, D=0,            label="wall_z0"),
+            ]
+            measurements, acoustic_err_cm = sweep_measurements(
+                [p for p in positions_arr], occluded_targets, visible_walls,
+                ChirpConfig(), np.random.default_rng(1234))
+            if acoustic_err_cm:
+                logger.info(f"  Acoustic DSP recovery error: "
+                            f"mean={np.mean(acoustic_err_cm):.2f}cm "
+                            f"(over {len(acoustic_err_cm)} returns)")
 
             points = cluster_and_triangulate(measurements, floor_y=floor_y)
             acoustic_point = np.array(points[0].position) if points else None
@@ -316,21 +333,32 @@ def run_full_pipeline(n_frames: int = 8, room_dims=None, furniture=None):
         _pts = np.array([g["position"] for g in all_static_gaussians])
         _xz_min = _pts[:, [0, 2]].min(axis=0)
         _xz_max = _pts[:, [0, 2]].max(axis=0)
-        _gx = np.arange(_xz_min[0], _xz_max[0] + 1e-6, 0.05)
-        _gz = np.arange(_xz_min[1], _xz_max[1] + 1e-6, 0.05)
+        # BUG-6 FIX: was 0.05m spacing — for a 5×4m room that produces
+        # 100×80×2 = 16k floor+ceiling points BEFORE wall infill, then
+        # another 10–30k wall points; total easily hits 50k+ BLUE Gaussians
+        # and creates O(N²) pressure when physics evaluation scans all_static_gaussians.
+        # Use 0.08m (matches realtime engine._proactive_blue) and add the same
+        # MAX_BLUE=12000 hard cap that the engine uses.
+        _SPACING = 0.08
+        _MAX_BLUE = 12000
+        _gx = np.arange(_xz_min[0], _xz_max[0] + 1e-6, _SPACING)
+        _gz = np.arange(_xz_min[1], _xz_max[1] + 1e-6, _SPACING)
         _n_blue0 = len(all_static_gaussians)
         for _x in _gx:
             for _z in _gz:
+                if len(all_static_gaussians) - _n_blue0 >= _MAX_BLUE:
+                    logger.debug("[Layer 2a] floor/ceiling cap reached (%d)", _MAX_BLUE)
+                    break
                 all_static_gaussians.append({
                     "position": [float(_x), float(floor_y), float(_z)],
                     "normal": [0.0, 1.0, 0.0], "color": [0.55, 0.58, 0.62],
-                    "scale": 0.04, "opacity": 0.9, "confidence": 0.95,
+                    "scale": 0.06, "opacity": 0.9, "confidence": 0.95,
                     "tag": "BLUE", "semantic": "FLOOR",
                 })
                 all_static_gaussians.append({
                     "position": [float(_x), float(ceiling_y), float(_z)],
                     "normal": [0.0, -1.0, 0.0], "color": [0.80, 0.80, 0.78],
-                    "scale": 0.04, "opacity": 0.9, "confidence": 0.95,
+                    "scale": 0.06, "opacity": 0.9, "confidence": 0.95,
                     "tag": "BLUE", "semantic": "CEILING",
                 })
         # LAW 6 — STRUCTURAL SUPPORT: a wall segment observed anywhere must
@@ -343,20 +371,23 @@ def run_full_pipeline(n_frames: int = 8, room_dims=None, furniture=None):
             (2, 0.0,            np.array([0., 0., 1.])),   # z = 0
             (2, room_dims["z"], np.array([0., 0., -1.])),  # z = Z
         ]
-        _gy = np.arange(floor_y + 0.05, ceiling_y - 0.02, 0.05)
+        _gy = np.arange(floor_y + _SPACING, ceiling_y - 0.02, _SPACING)
         for _ax, _plane, _nrm in _walls:
             _near = _pts[np.abs(_pts[:, _ax] - _plane) < 0.15]
             if len(_near) < 50:
                 continue                       # wall never observed — stays RED
             _lat = 2 if _ax == 0 else 0        # lateral axis along the wall
             _lo, _hi = _near[:, _lat].min(), _near[:, _lat].max()
-            for _t in np.arange(_lo, _hi + 1e-6, 0.05):
+            for _t in np.arange(_lo, _hi + 1e-6, _SPACING):
                 for _y in _gy:
+                    if len(all_static_gaussians) - _n_blue0 >= _MAX_BLUE:
+                        logger.debug("[Layer 2a] wall cap reached (%d)", _MAX_BLUE)
+                        break
                     _p = [0.0, float(_y), 0.0]
                     _p[_ax] = float(_plane); _p[_lat] = float(_t)
                     all_static_gaussians.append({
                         "position": _p, "normal": _nrm.tolist(),
-                        "color": [0.72, 0.74, 0.78], "scale": 0.04,
+                        "color": [0.72, 0.74, 0.78], "scale": 0.06,
                         "opacity": 0.9, "confidence": 0.95,
                         "tag": "BLUE", "semantic": "WALL",
                     })
@@ -458,6 +489,59 @@ def run_full_pipeline(n_frames: int = 8, room_dims=None, furniture=None):
             g["semantic"] = "WALL";    _relabeled += 1
     if _relabeled:
         logger.info(f"[Layer 2b] Atlanta-World relabel: {_relabeled} points")
+
+    # ── Layer 2c: SEED RED voxels for genuinely-occluded volumes (SYSTEMIC FIX) ─
+    # Root cause of generated=0/green=0 in every scene: the proactive BLUE laws
+    # fill all architectural surfaces, the camera sees the rest, so NO voxel is
+    # ever left RED — and Layer 3 (which only generates for RED voxels) was
+    # always skipped. The core contribution ("imagine only what physics cannot
+    # determine") never executed.
+    #
+    # Fix: the INTERIOR of an opaque occluder (furniture marked visible=False)
+    # is genuinely unknown — the camera sees its shell, physics does not
+    # determine its contents, acoustics only reach its surface. That volume is
+    # exactly what generation is for. Seed RED voxels there. They bypass the
+    # contradiction loop (they are not re-tagged) and feed Layer 3 directly.
+    _red_seeded = 0
+    _had_occluded = False
+    for _f in furniture:
+        if _f.get("visible", True):
+            continue                      # only occluded furniture has unknown interior
+        _had_occluded = True
+        bmin, bmax = np.array(_f["bbox_min"], float), np.array(_f["bbox_max"], float)
+        # sample the interior on a coarse grid, inset from the observed shell
+        gx = np.arange(bmin[0] + 0.12, bmax[0] - 0.10, 0.18)
+        gy = np.arange(bmin[1] + 0.12, bmax[1] - 0.05, 0.18)
+        gz = np.arange(bmin[2] + 0.12, bmax[2] - 0.10, 0.18)
+        # BUG-1 FIX (second-report edge case): furniture smaller than the grid
+        # step produces an EMPTY arange on that axis → 0 seeds → Layer 3 silently
+        # skipped. Fall back to the bbox centre so every occluded volume seeds
+        # at least one RED voxel.
+        if gx.size == 0 or gy.size == 0 or gz.size == 0:
+            _c = (bmin + bmax) / 2.0
+            gx = np.array([_c[0]]) if gx.size == 0 else gx
+            gy = np.array([_c[1]]) if gy.size == 0 else gy
+            gz = np.array([_c[2]]) if gz.size == 0 else gz
+            logger.info(f"[Layer 2c] Furniture too small for grid step; "
+                        f"seeding centre voxel at {_c.round(2).tolist()}")
+        for _x in gx:
+            for _y in gy:
+                for _z in gz:
+                    tagged_gaussians.append({
+                        "position": [float(_x), float(_y), float(_z)],
+                        "normal": [0.0, 1.0, 0.0], "color": [0.85, 0.15, 0.20],
+                        "scale": 0.06, "opacity": 0.35, "confidence": 0.20,
+                        "tag": TAG_RED, "semantic": "OCCLUDED_UNKNOWN",
+                    })
+                    _red_seeded += 1
+    if _red_seeded:
+        logger.info(f"[Layer 2c] Seeded {_red_seeded} RED voxels in occluded "
+                    f"volumes → Layer 3 generation will run.")
+    elif _had_occluded:
+        # BUG-1 FIX: never let IMAGINE silently vanish.
+        logger.warning("[Layer 2c] 0 RED voxels seeded despite occluded "
+                       "furniture present — Layer 3 generation will be SKIPPED. "
+                       "Check furniture bbox sizes.")
 
     # ── Layer 3: Affordance routing + generation ───────────────────────────
     logger.info("[Layer 3] Affordance routing + VideoScene generation...")
@@ -599,6 +683,9 @@ def run_full_pipeline(n_frames: int = 8, room_dims=None, furniture=None):
 
         else:
             # VIDEOSCENE and any future strategies: full generation pipeline
+            # Lazy-load LLaVA here — only the VIDEOSCENE path uses it.
+            from src.cloud.llm.llava_wrapper import LLaVASceneDescriber
+            llava = LLaVASceneDescriber()
             scene_desc = llava.describe_scene(
                 frames[-1].rgb_image if frames else np.zeros((192, 256, 3), dtype=np.uint8),
                 [semantic],

@@ -122,19 +122,19 @@ SLOTLSTM_SEMANTICS = {"CHAIR", "TABLE", "DESK", "SOFA", "BED", "SHELF", "CABINET
 SLOTLSTM_CONSTRAINTS = {
     "CHAIR": {
         "seat_height_range": (0.38, 0.55),   # meters from floor
-        "leg_count": (4, 4),                  # typical 4 legs
+        "leg_count": (1, 5),                  # BUG-4 FIX: was (4,4) min==max → rejected stools(1)/pedestals(1)/office chairs(5). Now 1–5.
         "backrest": True,
         "armrest": "optional"
     },
     "TABLE": {
         "surface_height_range": (0.68, 0.80),
-        "leg_count": (4, 4),
+        "leg_count": (1, 5),   # BUG-4 FIX: was (4,4) — allow stools/pedestals/5-star bases
         "surface_must_be_flat": True,
         "min_surface_area_m2": 0.25
     },
     "DESK": {
         "surface_height_range": (0.70, 0.80),
-        "leg_count": (4, 4),
+        "leg_count": (1, 5),   # BUG-4 FIX: was (4,4) — allow stools/pedestals/5-star bases
         "surface_must_be_flat": True
     },
     "SOFA": {
