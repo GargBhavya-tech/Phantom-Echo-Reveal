@@ -1,9 +1,9 @@
 {
   "n_vertices": 32872,
   "label_counts": {
-    "CEILING": 3478,
-    "FLOOR": 3279,
+    "CEILING": 3477,
+    "FLOOR": 3278,
     "OBJECT": 47,
-    "WALL": 26068
+    "WALL": 26070
   }
 }

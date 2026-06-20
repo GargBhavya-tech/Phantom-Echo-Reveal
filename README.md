@@ -1,15 +1,5 @@
 # PHANTOM-ECHO REVEAL
 
-> **v23 integrity pass** — the acoustic channel now recovers occluded-surface
-> range through real signal processing (matched filter + ISM + triangulation),
-> not from target coordinates. Stub models (synthetic depth densifier, template
-> occlusion fill) are labelled as such. Headline accuracy is the **real held-out**
-> RGB-D number (F1@5cm 0.957); the synthetic ~0.86-mean is a disclosed
-> self-consistency check, not the accuracy headline. Reproduce everything with `./reproduce.sh`. New in v24: real Depth-Anything-V2 backend + an animated **Sonar Reveal** demo (`output/sonar_reveal.html`, double-click). See `RUN_INSTRUCTIONS.md` for the full how-to-run guide.
-
-
-
-
 - **Problem Statement Number** - 09
 - **Problem Statement Title** - Occlusion-Aware 3D Scene Reconstruction in Partially Observable Real-World Environments
 - **Team name** - Chole Bhhature
@@ -40,6 +30,28 @@ Built from scratch for this hackathon. Algorithmic ideas build on published rese
 (Kazhdan & Hoppe 2013), the Image Source Method (Allen & Berkley 1979), and Synthetic
 Aperture Sonar triangulation — all re-implemented in this repo. No existing open-source
 project was used as a code base. Open-weight models used are listed above.
+
+### Runtime Compliance (open-weight only — no proprietary AI in the runtime)
+
+**The default runtime calls no proprietary AI API.** Every result in this
+submission — the headline F1@5cm 0.957, the acoustic triangulation, the demo,
+and the agentic Prove→Measure→Imagine planner — is produced by deterministic
+code plus open-weight models (MobileSAM, MobileCLIP-S2, LLaVA-NeXT, SVD). The
+`anthropic` package is **not** in `requirements.txt`, so no Claude/GPT call can
+execute in a clean install.
+
+The agent planner ships an *optional* `LLMPolicy` (`src/agent/planner.py`) that
+can use Claude via forced tool-use, but it is **off by default**, requires the
+user to set `PHANTOM_AGENT_LLM=claude` + install `anthropic` + supply their own
+key, and falls back to the deterministic policy on any error. It is included
+only to show the architecture is policy-agnostic; it is **not** part of the
+evaluated runtime and is never invoked by `reproduce.sh`, the tests, or any demo
+mode. To hard-disable it, leave `PHANTOM_AGENT_LLM` unset (the default).
+
+Separately: an AI coding assistant (Claude Code) was used during *development*
+as a critic and pair-programmer — commit co-author trailers reflect this
+honestly. All architecture, physics modelling, and design decisions are the
+team's own. See [`docs/ax.md`](docs/ax.md) for the full reflection.
 
 ---
 

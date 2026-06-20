@@ -16,6 +16,16 @@ do differently.
 
 ## 1. Open-Weight Models Used
 
+> **Runtime AI compliance.** Every model in the evaluated runtime is
+> open-weight (table below); the default runtime makes **no proprietary AI API
+> call**. The `anthropic` package is not in `requirements.txt`, so no
+> Claude/GPT call can execute in a clean install. An *optional, off-by-default*
+> Claude planner exists in `src/agent/planner.py` purely to demonstrate the
+> planner is policy-agnostic — it is never invoked by `reproduce.sh`, the test
+> suite, or any demo mode (see README → "Runtime Compliance"). Claude was used
+> as a *development* assistant and critic, reflected honestly in the commit
+> co-author trailers and in Section 7 below.
+
 ### LLaVA-NeXT-Video (llava-hf/LLaVA-NeXT-Video-7B-hf)
 **Role:** Vision-language scene understanding + prompt construction for generation.
 
