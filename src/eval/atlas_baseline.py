@@ -193,7 +193,7 @@ def print_table(comparison: dict):
     print("\n" + "="*70)
     print("  PHANTOM-ECHO REVEAL vs Atlas Baseline")
     print("="*70)
-    print(f"  {'Metric':<22} {'Atlas':>8}  {'PHANTOM':>8}  {'Target':>8}  {'Δ'}  {'KPI'}")
+    print(f"  {'Metric':<22} {'Atlas':>8}  {'PHANTOM':>8}  {'Target':>8}  {'Delta'}  {'KPI'}")
     print("-"*70)
     def _fmt(v, fmt=".4f"):
         return format(v, fmt) if v is not None else "  N/A  "

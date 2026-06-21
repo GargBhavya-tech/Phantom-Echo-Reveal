@@ -26,7 +26,7 @@
       "recall": 0.8007,
       "semantic_accuracy": 0.9494,
       "reconstruction_error_cm": 0.074,
-      "elapsed_s": 30.32,
+      "elapsed_s": 20.59,
       "tag_distribution": {
         "static": 17262,
         "dynamic": 3056,
@@ -58,7 +58,7 @@
       "recall": 0.699,
       "semantic_accuracy": 0.9373,
       "reconstruction_error_cm": 0.116,
-      "elapsed_s": 23.09,
+      "elapsed_s": 13.86,
       "tag_distribution": {
         "static": 13926,
         "dynamic": 3048,
@@ -90,7 +90,7 @@
       "recall": 0.6964,
       "semantic_accuracy": 0.9306,
       "reconstruction_error_cm": 0.14,
-      "elapsed_s": 23.5,
+      "elapsed_s": 14.77,
       "tag_distribution": {
         "static": 12566,
         "dynamic": 3055,
