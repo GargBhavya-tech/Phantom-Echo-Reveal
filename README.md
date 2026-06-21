@@ -5,9 +5,18 @@
 - **Team name** - Chole Bhhature
 - **Team members (Names)** - Bhavya Garg
 - **Institute/College Name** - IIIT Bangalore, 26/C, Electronics City Phase 1, Hosur Road, Bengaluru 560100
-- **Final Presentation Google Drive Link** - ⚠️ TODO BEFORE SUBMISSION: upload `PHANTOM_ECHO_REVEAL_Presentation.pptx` as a PDF to Google Drive, set link-sharing to "Anyone with the link", paste the URL here.
-- **Full Submission Demo Video Link** - ⚠️ TODO BEFORE SUBMISSION: upload the demo video to YouTube (public/unlisted — Drive uploads are NOT allowed for video), paste the URL here.
-- **Setup & Result Reproducibility Video Link** - ⚠️ TODO BEFORE SUBMISSION: record a screen capture of `./reproduce.sh` running (install → real eval → tests), upload to YouTube (public/unlisted), paste the URL here.
+- **Final Presentation Google Drive Link** -  https://drive.google.com/file/d/19BzMjPqj--rZNBhccx6RqT0lctmszCTz/view?usp=sharing
+- **Full Submission Demo Video Link** -  https://youtu.be/yK_UO12oUd8
+- **Setup & Result Reproducibility Video Link** -  https://youtu.be/-cx3FQUgTkc
+
+## Video Disclosure
+
+Both submission videos use AI-generated text-to-speech narration, read 
+from a script written entirely by the team. No other part of either 
+video is AI-generated: all screen recordings, system outputs, terminal 
+results, dashboard interactions, and the live demo are genuine, 
+unedited computation. Editing was limited to standard cuts and 
+speed-ups of idle wait time (e.g. package installation).
 
 ### Project Artefacts
 
