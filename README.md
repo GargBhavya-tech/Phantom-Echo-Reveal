@@ -254,7 +254,7 @@ python -m src.eval.atlas_baseline
 
 ### 6. Run the test suite
 ```bash
-python -m pytest tests/ -q            # 45 tests: physics laws + integrity
+python -m pytest tests/ -q            # 49 tests: physics laws + integrity
 ```
 
 ---

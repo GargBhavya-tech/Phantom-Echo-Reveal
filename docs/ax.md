@@ -319,7 +319,7 @@ Pinning guarantees exact weight identity.
 
 ---
 
-## 7. Phase 2 — Agentic Coding for the Real-Time Layer
+## 8. Phase 2 — Agentic Coding for the Real-Time Layer
 
 For Phase 2 we used an agentic coding assistant (Claude, in an
 agent harness with shell + file tools) to build the real-time layer
