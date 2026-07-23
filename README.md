@@ -1,23 +1,5 @@
 # PHANTOM-ECHO REVEAL
 
-- **Problem Statement Number** - 09
-- **Problem Statement Title** - Occlusion-Aware 3D Scene Reconstruction in Partially Observable Real-World Environments
-- **Team name** - Chole Bhhature
-- **Team members (Names)** - Bhavya Garg
-- **Institute/College Name** - IIIT Bangalore, 26/C, Electronics City Phase 1, Hosur Road, Bengaluru 560100
-- **Final Presentation Google Drive Link** - https://drive.google.com/file/d/19BzMjPqj--rZNBhccx6RqT0lctmszCTz/view?usp=sharing
-- **Full Submission Demo Video Link** - https://youtu.be/yK_UO12oUd8
-- **Setup & Result Reproducibility Video Link** - https://youtu.be/-cx3FQUgTkc
-
-## Video Disclosure
-
-Both submission videos use AI-generated text-to-speech narration, read
-from a script written entirely by the team. No other part of either
-video is AI-generated: all screen recordings, system outputs, terminal
-results, dashboard interactions, and the live demo are genuine,
-unedited computation. Editing was limited to standard cuts and
-speed-ups of idle wait time (e.g. package installation).
-
 ### Project Artefacts
 
 - **Technical Documentation** - [`docs/technical.md`](docs/technical.md) · [`docs/user_guide.md`](docs/user_guide.md) · [`docs/ax.md`](docs/ax.md)
@@ -34,7 +16,7 @@ speed-ups of idle wait time (e.g. package installation).
 
 ### Attribution
 
-Built from scratch for this hackathon. Algorithmic ideas build on published research —
+Built from scratch . Algorithmic ideas build on published research —
 3D Gaussian Splatting (Kerbl et al. 2023), Screened Poisson Surface Reconstruction
 (Kazhdan & Hoppe 2013), the Image Source Method (Allen & Berkley 1979), and Synthetic
 Aperture Sonar triangulation — all re-implemented in this repo. No existing open-source
@@ -56,11 +38,6 @@ key, and falls back to the deterministic policy on any error. It is included
 only to show the architecture is policy-agnostic; it is **not** part of the
 evaluated runtime and is never invoked by `reproduce.sh`, the tests, or any demo
 mode. To hard-disable it, leave `PHANTOM_AGENT_LLM` unset (the default).
-
-Separately: an AI coding assistant (Claude Code) was used during *development*
-as a critic and pair-programmer — commit co-author trailers reflect this
-honestly. All architecture, physics modelling, and design decisions are the
-team's own. See [`docs/ax.md`](docs/ax.md) for the full reflection.
 
 ---
 
