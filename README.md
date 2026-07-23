@@ -1,5 +1,14 @@
 # PHANTOM-ECHO REVEAL
 
+* Problem Statement Number - 09
+* Problem Statement Title - Occlusion-Aware 3D Scene Reconstruction in Partially Observable Real-World Environments
+* Team name - Chole Bhhature
+* Team members (Names) - Bhavya Garg
+* Institute/College Name - IIIT Bangalore, 26/C, Electronics City Phase 1, Hosur Road, Bengaluru 560100
+* Final Presentation Google Drive Link - https://drive.google.com/file/d/19BzMjPqj--rZNBhccx6RqT0lctmszCTz/view?usp=sharing
+* Full Submission Demo Video Link - https://youtu.be/yK_UO12oUd8
+* Setup & Result Reproducibility Video Link - https://youtu.be/-cx3FQUgTkc
+
 ### Project Artefacts
 
 - **Technical Documentation** - [`docs/technical.md`](docs/technical.md) · [`docs/user_guide.md`](docs/user_guide.md) · [`docs/ax.md`](docs/ax.md)
