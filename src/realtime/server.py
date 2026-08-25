@@ -136,15 +136,52 @@ def _build_qr_event() -> Optional[dict]:
     import socket, base64, io
     try:
         import qrcode
-        # Resolve LAN IP so the QR works from phones on the same WiFi
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))
-            lan_ip = s.getsockname()[0]
-        except Exception:
-            lan_ip = "localhost"
-        finally:
-            s.close()
+        # Resolve LAN IP so the QR works from phones on the same WiFi.
+        # Priority: LAN_IP env var → best Wi-Fi interface → UDP route trick → localhost
+        lan_ip = os.environ.get("LAN_IP", "").strip()
+        if not lan_ip:
+            # Walk all interfaces and prefer a real Wi-Fi/Ethernet subnet over
+            # VPN tunnels (which typically sit on 172.16.0.x/10.x virtual adapters).
+            try:
+                import socket as _s
+                all_ips = []
+                for info in _s.getaddrinfo(_s.gethostname(), None, _s.AF_INET):
+                    ip = info[4][0]
+                    if ip.startswith("127."):
+                        continue
+                    all_ips.append(ip)
+                # Score: prefer real Wi-Fi subnets over VirtualBox/VMware/VPN
+                # Known virtual adapter ranges to deprioritize:
+                #   192.168.56.x  — VirtualBox host-only
+                #   192.168.99.x  — Docker/VirtualBox
+                #   192.168.122.x — libvirt/KVM
+                VIRTUAL_SUBNETS = {(192, 168, 56), (192, 168, 99), (192, 168, 122)}
+                def _ip_score(ip):
+                    parts = list(map(int, ip.split(".")))
+                    subnet3 = tuple(parts[:3])
+                    if subnet3 in VIRTUAL_SUBNETS:
+                        return (8, 0)          # VirtualBox/Docker — skip
+                    if parts[0] == 192 and parts[1] == 168:
+                        return (0, -parts[3])  # real home/office WiFi (higher DHCP = better)
+                    if parts[0] == 172:
+                        return (1, -parts[3])  # 172.x — real WiFi DHCP
+                    if parts[0] == 10:
+                        return (2, -parts[3])  # corporate WiFi
+                    return (9, 0)              # unknown — avoid
+                if all_ips:
+                    lan_ip = sorted(all_ips, key=_ip_score)[0]
+            except Exception:
+                pass
+        if not lan_ip:
+            # Final fallback: UDP route trick (may pick VPN on some setups)
+            s2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s2.connect(("8.8.8.8", 80))
+                lan_ip = s2.getsockname()[0]
+            except Exception:
+                lan_ip = "localhost"
+            finally:
+                s2.close()
         port = int(os.environ.get("PORT", "8000"))
         # QR points at the phone capture page (/m), not the heavy 3D dashboard.
         url = f"http://{lan_ip}:{port}/m"

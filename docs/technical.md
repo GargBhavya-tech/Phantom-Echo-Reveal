@@ -76,9 +76,9 @@ LAYER 3 ── Semantic Affordance Router + VideoScene
   ┌──────────────────────────────┐
   │  SKIP (already BLUE/TEAL)    │
   │  FAISS retrieve (wall/floor) │──▶ GREEN Gaussians
-  │  VideoScene diffusion (3s)   │
+  │  Video  s)   │
   └──────────────────────────────┘
-                          ▼
+                          ▼ 
 LAYER 4 ── Dual Output
   ┌─────────────────────────┐   ┌──────────────────────┐
   │  Navigation map          │   │  Deliverable mesh    │
